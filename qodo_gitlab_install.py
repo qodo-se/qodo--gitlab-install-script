@@ -10,6 +10,7 @@ import argparse
 import json
 import logging
 import os
+import secrets
 import sys
 import time
 from dataclasses import dataclass, asdict
@@ -32,7 +33,7 @@ logger = logging.getLogger(__name__)
 class WebhookConfig:
     """Webhook configuration"""
     merge_request_url: str
-    secret_token: str
+    secret_token: Optional[str]  # Auto-generated if not provided
     events: List[str]
 
 
@@ -55,6 +56,7 @@ class ConfigurationSummary:
     group_access_token: Optional[str]  # Only available when newly created
     personal_access_token_used: bool
     webhook_secret: str
+    webhook_secret_auto_generated: bool
     webhook_url: str
 
 
@@ -177,6 +179,14 @@ class QodoGitLabInstaller:
         self.config = config
         self.client = GitLabClient(config.gitlab_base_url, gitlab_token, config.dry_run)
         self.gitlab_token = gitlab_token  # Store for configuration summary
+        
+        # Auto-generate webhook secret if not provided
+        self.webhook_secret_auto_generated = False
+        if not self.config.webhooks.secret_token:
+            self.config.webhooks.secret_token = self._generate_webhook_secret()
+            self.webhook_secret_auto_generated = True
+            logger.info("Auto-generated webhook secret (cryptographically secure)")
+        
         self.report = ActionReport(
             tokens_created=[],
             tokens_verified=[],
@@ -188,6 +198,12 @@ class QodoGitLabInstaller:
             groups_skipped=0,
             configuration_summary=[]
         )
+    
+    def _generate_webhook_secret(self) -> str:
+        """Generate a cryptographically secure webhook secret"""
+        # Generate 32 bytes (256 bits) of random data, encoded as hex
+        # This provides a strong secret for HMAC signature verification
+        return secrets.token_hex(32)
     
     def verify_auth(self) -> bool:
         """Verify authentication and permissions"""
@@ -432,6 +448,7 @@ class QodoGitLabInstaller:
             group_access_token=group_token if not using_pat else None,
             personal_access_token_used=using_pat,
             webhook_secret=self.config.webhooks.secret_token,
+            webhook_secret_auto_generated=self.webhook_secret_auto_generated,
             webhook_url=self.config.webhooks.merge_request_url
         )
         
@@ -524,14 +541,19 @@ class QodoGitLabInstaller:
             if summary.personal_access_token_used:
                 print(f"  Access Token:      Using Personal Access Token (from environment)")
                 print(f"                     Value: {self.gitlab_token[:8]}...{self.gitlab_token[-4:]}")
+                print(f"                     Scope: api (covers Qodo Merge + Qodo Aware)")
             elif summary.group_access_token:
                 print(f"  Group Access Token: {summary.group_access_token}")
                 print(f"                     ⚠️  SAVE THIS - shown only once!")
+                print(f"                     Scope: api (covers Qodo Merge + Qodo Aware)")
             else:
                 print(f"  Group Access Token: Already exists (not shown)")
+                print(f"                     Scope: api (covers Qodo Merge + Qodo Aware)")
             
             print(f"  Webhook URL:       {summary.webhook_url}")
             print(f"  Webhook Secret:    {summary.webhook_secret}")
+            if summary.webhook_secret_auto_generated:
+                print(f"                     ⚠️  AUTO-GENERATED - SAVE THIS!")
             print()
         
         print("=" * 80)
@@ -575,7 +597,7 @@ def load_config(config_path: str) -> Config:
     
     webhook_config = WebhookConfig(
         merge_request_url=data['webhooks']['merge_request_url'],
-        secret_token=data['webhooks']['secret_token'],
+        secret_token=data['webhooks'].get('secret_token'),  # Optional - auto-generated if not provided
         events=data['webhooks'].get('events', ['merge_requests', 'note', 'pipeline', 'push'])
     )
     

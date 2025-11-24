@@ -1,49 +1,29 @@
 # Qodo GitLab Integration Setup
 
-Automated script to configure GitLab groups for Qodo Merge and Qodo Aware integration.
+Automated setup for Qodo Merge and Qodo Aware integration with GitLab.
 
 ## Quick Start
 
-1. **Install dependencies**:
-
 ```bash
-python3 -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+# 1. Install
+python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-```
 
-2. **Create config file** (`config.yaml`):
+# 2. Configure
+cp config.example.yaml config.yaml
+# Edit config.yaml with your GitLab URL and groups
 
-```yaml
-gitlab_base_url: "https://gitlab.company.com"
-auth_mode: "group_token_per_root_group"
-
-root_groups:
-  - "engineering"
-
-webhooks:
-  merge_request_url: "https://qodo.company.com/webhooks/gitlab"
-  secret_token: "your-webhook-secret"
-```
-
-3. **Set environment variable**:
-
-```bash
+# 3. Run
 export GITLAB_ADMIN_TOKEN="glpat-xxxxxxxxxxxx"
-```
-
-4. **Run the script**:
-
-```bash
 python qodo_gitlab_install.py --config config.yaml
 ```
 
 ## What It Does
 
-- ✅ Creates/verifies access tokens with `api` scope
-- ✅ Configures webhooks on all groups and subgroups
-- ✅ Idempotent (safe to run multiple times)
-- ✅ Reports all changes in JSON format
+- Creates access tokens with `api` scope (covers Qodo Merge + Aware)
+- Auto-generates secure webhook secrets
+- Configures webhooks on all groups and subgroups
+- Idempotent and safe to re-run
 
 ## Configuration
 
@@ -53,7 +33,7 @@ python qodo_gitlab_install.py --config config.yaml
 | `auth_mode` | Yes | `group_token_per_root_group` or `bot_user_pat` |
 | `root_groups` | Yes | List of root group paths/IDs to manage |
 | `webhooks.merge_request_url` | Yes | Qodo webhook endpoint |
-| `webhooks.secret_token` | Yes | Webhook signature secret |
+| `webhooks.secret_token` | No | Webhook signature secret (auto-generated if omitted) |
 
 ## Options
 
@@ -80,9 +60,9 @@ See [INSTALL.md](INSTALL.md) for detailed installation instructions.
 
 ## Documentation
 
-- [INSTALL.md](INSTALL.md) - Step-by-step installation guide
-- [EXAMPLES.md](EXAMPLES.md) - Usage examples and common patterns
-- [AGENTS.md](AGENTS.md) - Complete technical documentation
+- [INSTALL.md](INSTALL.md) - Detailed installation guide
+- [EXAMPLES.md](EXAMPLES.md) - Usage examples
+- [AGENTS.md](AGENTS.md) - Technical documentation
 
 ## Exit Codes
 
