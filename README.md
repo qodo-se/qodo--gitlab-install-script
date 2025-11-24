@@ -34,6 +34,7 @@ python qodo_gitlab_install.py --config config.yaml
 | `root_groups` | Yes | List of root group paths/IDs to manage |
 | `webhooks.merge_request_url` | Yes | Qodo webhook endpoint |
 | `webhooks.secret_token` | No | Webhook signature secret (auto-generated if omitted) |
+| `token_expires_in_days` | No | Token expiration in days (default: 365, only for `group_token_per_root_group` mode) |
 
 ## Options
 

@@ -46,6 +46,7 @@ class Config:
     webhooks: WebhookConfig
     dry_run: bool = False
     log_level: str = "info"
+    token_expires_in_days: int = 365  # Default: 1 year
 
 
 @dataclass
@@ -109,6 +110,13 @@ class GitLabClient:
                 
             except requests.exceptions.RequestException as e:
                 if attempt == max_retries - 1:
+                    # Log response body for debugging on final failure
+                    if hasattr(e, 'response') and e.response is not None:
+                        try:
+                            error_detail = e.response.json()
+                            logger.error(f"API Error Details: {json.dumps(error_detail, indent=2)}")
+                        except:
+                            logger.error(f"API Error Response: {e.response.text}")
                     raise
                 logger.warning(f"Request failed (attempt {attempt + 1}/{max_retries}): {e}")
                 time.sleep(retry_delay * (2 ** attempt))
@@ -290,11 +298,17 @@ class QodoGitLabInstaller:
                 return None
             
             # Create new token
-            logger.info(f"Group {group_id}: Creating new token")
+            logger.info(f"Group {group_id}: Creating new token (expires in {self.config.token_expires_in_days} days)")
+            
+            # Calculate expiration date based on configured days
+            from datetime import datetime, timedelta
+            expires_at = (datetime.now() + timedelta(days=self.config.token_expires_in_days)).strftime('%Y-%m-%d')
+            
             payload = {
                 'name': 'Qodo-Integration',
                 'scopes': ['api'],
-                'access_level': 40  # Maintainer
+                'access_level': 40,  # Maintainer
+                'expires_at': expires_at
             }
             
             created = self.client.post(f'/api/v4/groups/{group_id}/access_tokens', json=payload)
@@ -607,7 +621,8 @@ def load_config(config_path: str) -> Config:
         root_groups=data['root_groups'],
         webhooks=webhook_config,
         dry_run=data.get('dry_run', False),
-        log_level=data.get('log_level', 'info')
+        log_level=data.get('log_level', 'info'),
+        token_expires_in_days=data.get('token_expires_in_days', 365)
     )
 
 

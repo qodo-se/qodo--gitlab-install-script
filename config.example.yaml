@@ -16,8 +16,9 @@ webhooks:
   events:
     - merge_requests
     - note
-    - pipeline
-    - push
+
+# Optional: Token expiration (only applies to group_token_per_root_group mode)
+token_expires_in_days: 365  # Default: 365 days (1 year)
 
 # Optional
 qodo_context:
