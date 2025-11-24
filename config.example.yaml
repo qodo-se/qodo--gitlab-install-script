@@ -1,0 +1,43 @@
+# Qodo GitLab Integration Configuration
+# Copy this file to config.yaml and customize for your environment
+
+# GitLab instance URL
+gitlab_base_url: "https://gitlab.company.com"
+
+# Authentication mode:
+# - "group_token_per_root_group": Create a group access token for each root group (recommended)
+# - "bot_user_pat": Use a single bot user Personal Access Token for all groups
+auth_mode: "group_token_per_root_group"
+
+# Root groups to manage (paths or IDs)
+# The script will process these groups and all their subgroups
+root_groups:
+  - "engineering"
+  - "product"
+  # - "12345"  # You can also use group IDs
+
+# Webhook configuration
+webhooks:
+  # Qodo Merge webhook endpoint (from your Qodo deployment)
+  merge_request_url: "https://qodo.company.com/webhooks/gitlab"
+  
+  # Webhook secret token for signature verification
+  secret_token: "your-webhook-secret-token-here"
+  
+  # Events to trigger webhooks
+  # Recommended events for Qodo integration:
+  events:
+    - merge_requests  # MR open/update/merge/close
+    - note           # Comments on MRs
+    - pipeline       # Pipeline status updates
+    - push           # Push events (optional)
+
+# Optional: Qodo-specific context
+qodo_context:
+  domain: "company.com"
+  group_ids: []
+  token_destination: "vault"  # or "env", "aws_sm"
+
+# Execution options
+dry_run: false        # Set to true to preview changes without making them
+log_level: "info"     # Options: debug, info, warning, error
