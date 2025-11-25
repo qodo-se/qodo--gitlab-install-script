@@ -2,71 +2,74 @@
 
 Automated setup for Qodo Merge and Qodo Aware integration with GitLab.
 
+This script automates the manual setup steps described in the official Qodo documentation:
+- **[Qodo Merge - GitLab Single-Tenant Setup](https://docs.qodo.ai/qodo-documentation/qodo-merge/getting-started/setup-and-installation/gitlab/qodo-single-tenant-gitlab)**
+- **[Qodo Aware - Index Your GitLab Codebase](https://docs.qodo.ai/qodo-documentation/qodo-aware/getting-started/enterprise-self-hosted/3.-index-your-codebase/gitlab)**
+
 ## Quick Start
 
 ```bash
-# 1. Install
+# 1. Install dependencies
 python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 
-# 2. Configure
-cp config.example.yaml config.yaml
-# Edit config.yaml with your GitLab URL and groups
-
-# 3. Run
+# 2. Create Personal Access Token
+# Go to GitLab → Preferences → Access Tokens
+# Create token with 'api' scope and Owner role on target groups
 export GITLAB_ADMIN_TOKEN="glpat-xxxxxxxxxxxx"
+
+# 3. Configure
+cp config.example.yaml config.yaml
+# Edit: gitlab_base_url, root_groups, webhooks.merge_request_url
+
+# 4. Run
 python qodo_gitlab_install.py --config config.yaml
 ```
 
 ## What It Does
 
-- Creates access tokens with `api` scope (covers Qodo Merge + Aware)
+- Creates group access tokens with `api` and `read_repository` scopes
 - Auto-generates secure webhook secrets
-- Configures webhooks on all groups and subgroups
-- Idempotent and safe to re-run
+- Configures webhooks for merge requests and comments only
+- Idempotent (safe to re-run)
 
-## Configuration
+## Configuration Fields
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `gitlab_base_url` | Yes | Your GitLab instance URL |
-| `auth_mode` | Yes | `group_token_per_root_group` or `bot_user_pat` |
-| `root_groups` | Yes | List of root group paths/IDs to manage |
+| `gitlab_base_url` | Yes | GitLab instance URL |
+| `auth_mode` | Yes | `group_token_per_root_group` (recommended) or `bot_user_pat` |
+| `root_groups` | Yes | Group paths or IDs to configure |
 | `webhooks.merge_request_url` | Yes | Qodo webhook endpoint |
-| `webhooks.secret_token` | No | Webhook signature secret (auto-generated if omitted) |
-| `token_expires_in_days` | No | Token expiration in days (default: 365, only for `group_token_per_root_group` mode) |
+| `webhooks.secret_token` | No | Auto-generated if omitted |
+| `token_expires_in_days` | No | Default: 365 |
+| `dry_run` | No | Default: false |
+| `log_level` | No | Default: info |
 
-## Options
+## CLI Options
 
 ```bash
-# Dry run (no changes)
+# Dry run
 python qodo_gitlab_install.py --config config.yaml --dry-run
 
-# Debug mode
+# Debug logging
 python qodo_gitlab_install.py --config config.yaml --log-level debug
-
-# Save state and report
-python qodo_gitlab_install.py --config config.yaml --state state.json --report report.json
 ```
 
 ## Requirements
 
 - Python 3.8+
-- GitLab Owner permissions on target groups
+- GitLab Owner role on target groups
 - GitLab Premium+ (for group webhooks)
-
-## Installation
-
-See [INSTALL.md](INSTALL.md) for detailed installation instructions.
-
-## Documentation
-
-- [INSTALL.md](INSTALL.md) - Detailed installation guide
-- [EXAMPLES.md](EXAMPLES.md) - Usage examples
-- [AGENTS.md](AGENTS.md) - Technical documentation
 
 ## Exit Codes
 
-- `0` - Success (idempotent, no errors)
+- `0` - Success
 - `2` - Partial success (some groups skipped)
 - `3` - Authentication/permission failure
+
+## Documentation
+
+- [INSTALL.md](INSTALL.md) - Detailed installation
+- [EXAMPLES.md](EXAMPLES.md) - Usage examples
+- [AGENTS.md](AGENTS.md) - Technical architecture

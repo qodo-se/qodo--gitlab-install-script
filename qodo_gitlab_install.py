@@ -34,7 +34,6 @@ class WebhookConfig:
     """Webhook configuration"""
     merge_request_url: str
     secret_token: Optional[str]  # Auto-generated if not provided
-    events: List[str]
 
 
 @dataclass
@@ -265,7 +264,7 @@ class QodoGitLabInstaller:
         
         return groups
     
-    def find_valid_token(self, tokens: List[Dict], name: str = "Qodo-Integration") -> Optional[Dict]:
+    def find_valid_token(self, tokens: List[Dict], name: str = "Qodo AI Integration") -> Optional[Dict]:
         """Find a valid, non-expired token"""
         for token in tokens:
             if token.get('name') == name and not token.get('revoked', False):
@@ -305,8 +304,9 @@ class QodoGitLabInstaller:
             expires_at = (datetime.now() + timedelta(days=self.config.token_expires_in_days)).strftime('%Y-%m-%d')
             
             payload = {
-                'name': 'Qodo-Integration',
-                'scopes': ['api'],
+                'name': 'Qodo AI Integration',
+                'description': 'Qodo provides AI-powered code intelligence for merge requests and context-aware code indexing. This token enables Qodo Merge for MR reviews and Qodo Aware for repository analysis.',
+                'scopes': ['api', 'read_repository'],
                 'access_level': 40,  # Maintainer
                 'expires_at': expires_at
             }
@@ -329,6 +329,34 @@ class QodoGitLabInstaller:
             
             return None
             
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 400:
+                error_msg = e.response.json().get('message', str(e))
+                if 'permission' in error_msg.lower():
+                    logger.error(f"Group {group_id}: Insufficient permissions to create group access token")
+                    logger.error(f"Group {group_id}: The authenticated user needs Owner role on this group")
+                    logger.error(f"Group {group_id}: Please create the token manually or use a user with Owner permissions")
+                    self.report.errors.append({
+                        'group_id': group_id,
+                        'operation': 'ensure_token',
+                        'error': 'Insufficient permissions - Owner role required to create group access tokens',
+                        'manual_action_required': True
+                    })
+                else:
+                    logger.error(f"Group {group_id}: Failed to create token: {error_msg}")
+                    self.report.errors.append({
+                        'group_id': group_id,
+                        'operation': 'ensure_token',
+                        'error': error_msg
+                    })
+            else:
+                logger.error(f"Group {group_id}: Failed to ensure token: {e}")
+                self.report.errors.append({
+                    'group_id': group_id,
+                    'operation': 'ensure_token',
+                    'error': str(e)
+                })
+            return None
         except Exception as e:
             logger.error(f"Group {group_id}: Failed to ensure token: {e}")
             self.report.errors.append({
@@ -363,15 +391,18 @@ class QodoGitLabInstaller:
             # Get existing hooks
             hooks = self.client.get(f'/api/v4/groups/{group_id}/hooks')
             
-            # Build desired configuration
+            # Build desired configuration with only merge_requests and note events enabled
+            # Qodo Merge requires merge request and comment events for AI-powered code reviews
             desired = {
                 'url': self.config.webhooks.merge_request_url,
                 'enable_ssl_verification': True,
                 'token': self.config.webhooks.secret_token,
-                'push_events': 'push' in self.config.webhooks.events,
-                'merge_requests_events': 'merge_requests' in self.config.webhooks.events,
-                'note_events': 'note' in self.config.webhooks.events,
-                'pipeline_events': 'pipeline' in self.config.webhooks.events,
+                'push_events': False,
+                'merge_requests_events': True,
+                'note_events': True,
+                'pipeline_events': False,
+                'name': 'Qodo AI Integration',
+                'description': 'Qodo provides AI-powered code intelligence for merge requests and context-aware code indexing. This webhook enables Qodo Merge for MR reviews and Qodo Aware for repository analysis.',
             }
             
             # Find existing hook with matching URL
@@ -468,15 +499,11 @@ class QodoGitLabInstaller:
         
         self.report.configuration_summary.append(summary)
     
-    def process_group(self, group_id: int) -> bool:
-        """Process a single group"""
+    def process_group(self, group_id: int, is_root: bool = False) -> bool:
+        """Process a single group (webhooks only, tokens handled separately for root groups)"""
         logger.info(f"Processing group {group_id}")
         
         try:
-            # Ensure token (only for root groups in group_token mode)
-            if self.config.auth_mode == "group_token_per_root_group":
-                self.ensure_group_token(group_id)
-            
             # Ensure webhook
             webhook_ok = self.ensure_group_webhook(group_id)
             
@@ -501,7 +528,7 @@ class QodoGitLabInstaller:
         if not self.verify_auth():
             return 3
         
-        # Process each root group
+        # Process each root group (ONLY the specified groups, no subgroups)
         for root_group in self.config.root_groups:
             logger.info(f"Processing root group: {root_group}")
             
@@ -519,13 +546,8 @@ class QodoGitLabInstaller:
             # Build configuration summary for this root group
             self.build_configuration_summary(group_id, created_token)
             
-            # Traverse all groups
-            all_groups = self.traverse_groups(group_id)
-            logger.info(f"Found {len(all_groups)} groups (including subgroups)")
-            
-            # Process each group
-            for gid in all_groups:
-                self.process_group(gid)
+            # Process ONLY this root group (no subgroup traversal)
+            self.process_group(group_id, is_root=True)
         
         # Print report
         self.print_report()
@@ -555,14 +577,14 @@ class QodoGitLabInstaller:
             if summary.personal_access_token_used:
                 print(f"  Access Token:      Using Personal Access Token (from environment)")
                 print(f"                     Value: {self.gitlab_token[:8]}...{self.gitlab_token[-4:]}")
-                print(f"                     Scope: api (covers Qodo Merge + Qodo Aware)")
+                print(f"                     Scopes: api, read_repository")
             elif summary.group_access_token:
                 print(f"  Group Access Token: {summary.group_access_token}")
                 print(f"                     ⚠️  SAVE THIS - shown only once!")
-                print(f"                     Scope: api (covers Qodo Merge + Qodo Aware)")
+                print(f"                     Scopes: api, read_repository")
             else:
                 print(f"  Group Access Token: Already exists (not shown)")
-                print(f"                     Scope: api (covers Qodo Merge + Qodo Aware)")
+                print(f"                     Scopes: api, read_repository")
             
             print(f"  Webhook URL:       {summary.webhook_url}")
             print(f"  Webhook Secret:    {summary.webhook_secret}")
@@ -573,25 +595,9 @@ class QodoGitLabInstaller:
         print("=" * 80)
         print()
         
-        # Print detailed execution report
+        # Print summary statistics only
         logger.info("=" * 80)
-        logger.info("EXECUTION REPORT")
-        logger.info("=" * 80)
-        
-        report_dict = asdict(self.report)
-        
-        # Mask token values in JSON output
-        for token in report_dict['tokens_created']:
-            if 'token_value' in token:
-                token['token_value'] = '***MASKED***'
-        
-        # Mask tokens in configuration summary for JSON output
-        for summary in report_dict['configuration_summary']:
-            if summary.get('group_access_token'):
-                summary['group_access_token'] = '***MASKED***'
-        
-        print(json.dumps(report_dict, indent=2))
-        
+        logger.info("SUMMARY")
         logger.info("=" * 80)
         logger.info(f"Groups processed: {self.report.groups_processed}")
         logger.info(f"Groups skipped: {self.report.groups_skipped}")
@@ -611,8 +617,7 @@ def load_config(config_path: str) -> Config:
     
     webhook_config = WebhookConfig(
         merge_request_url=data['webhooks']['merge_request_url'],
-        secret_token=data['webhooks'].get('secret_token'),  # Optional - auto-generated if not provided
-        events=data['webhooks'].get('events', ['merge_requests', 'note', 'pipeline', 'push'])
+        secret_token=data['webhooks'].get('secret_token')  # Optional - auto-generated if not provided
     )
     
     return Config(

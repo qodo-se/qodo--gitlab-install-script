@@ -1,30 +1,22 @@
-# Copy to config.yaml and customize
-
+# GitLab instance URL
 gitlab_base_url: "https://gitlab.company.com"
 
-# "group_token_per_root_group" (recommended) or "bot_user_pat"
+# Authentication: "group_token_per_root_group"
 auth_mode: "group_token_per_root_group"
 
-# Group paths or IDs - processes all subgroups recursively
+# Group paths or IDs to configure
 root_groups:
   - "engineering"
   - "product"
 
+# Qodo webhook endpoint
 webhooks:
   merge_request_url: "https://qodo.company.com/webhooks/gitlab"
   # secret_token: "optional-auto-generated-if-omitted"
-  events:
-    - merge_requests
-    - note
 
-# Optional: Token expiration (only applies to group_token_per_root_group mode)
-token_expires_in_days: 365  # Default: 365 days (1 year)
+# Token expiration (days)
+token_expires_in_days: 365
 
-# Optional
-qodo_context:
-  domain: "company.com"
-  group_ids: []
-  token_destination: "vault"
-
+# Execution options
 dry_run: false
 log_level: "info"
