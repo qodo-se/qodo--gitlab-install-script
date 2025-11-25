@@ -7,11 +7,8 @@
 4. [Webhook Strategy](#webhook-strategy)
 5. [API Surface](#api-surface)
 6. [Algorithm](#algorithm)
-7. [Data Model](#data-model)
-8. [Edge Cases & Guardrails](#edge-cases--guardrails)
-9. [Security & Secrets](#security--secrets)
-10. [CLI Usage](#cli-usage)
-11. [Testing](#testing)
+7. [Edge Cases & Guardrails](#edge-cases--guardrails)
+8. [Security & Secrets](#security--secrets)
 
 ---
 
@@ -19,16 +16,17 @@
 
 ### What the Script Does
 
-1. **Traverses** one or more top-level GitLab groups (and all nested subgroups)
-2. **Ensures** a single reusable token with sufficient scopes exists for Qodo
-3. **Ensures** required group-level webhooks exist (idempotent create/update) pointing to Qodo endpoints
-4. **Runs safely** every time (idempotent, retryable) and reports a diff of changes
+1. **Processes** one or more specified GitLab root groups
+2. **Creates** one group access token per root group with `api` scope
+3. **Configures** group-level webhooks (idempotent create/update) for merge requests and comments
+4. **Leverages** GitLab's group webhook inheritance (webhooks automatically apply to all subgroups and projects)
+5. **Runs safely** every time (idempotent, retryable) and reports changes made
 
 ### Background
 
-- **Qodo Merge** (single-tenant GitLab guide) requires an access token with `api` scope and webhooks on groups/projects to drive MR intelligence
-- **Qodo Aware** (Context Engine → GitLab) recommends group access tokens with `read_api` and `read_repository` scopes for indexing
-- **Consolidation**: A single token with `api` scope covers both (it implies read_api and grants MR actions Qodo Merge needs)
+- **Qodo Merge** requires an access token with `api` scope and webhooks for MR events
+- **Qodo Aware** requires read access to repositories for indexing
+- **Implementation**: A single token with `api` scope covers both products (api scope includes read permissions)
 
 ---
 
@@ -40,8 +38,8 @@
 # GitLab instance
 gitlab_base_url: "https://gitlab.company.com"
 
-# Authentication strategy
-auth_mode: "group_token_per_root_group"  # or "bot_user_pat"
+# Authentication strategy (only group_token_per_root_group is supported)
+auth_mode: "group_token_per_root_group"
 
 # Root groups to manage (paths or IDs)
 root_groups:
@@ -51,18 +49,10 @@ root_groups:
 # Webhook configuration
 webhooks:
   merge_request_url: "https://qodo.company.com/webhooks/gitlab"
-  secret_token: "your-webhook-secret-here"
-  events:
-    - merge_requests
-    - note
-    - pipeline
-    - push
+  secret_token: "optional-auto-generated-if-omitted"
 
-# Optional: Qodo context
-qodo_context:
-  domain: "company.com"
-  group_ids: []
-  token_destination: "vault"
+# Token expiration (days)
+token_expires_in_days: 365
 
 # Execution options
 dry_run: false
@@ -71,70 +61,72 @@ log_level: "info"  # info or debug
 
 ### Outputs
 
-**STDOUT/JSON Report** containing:
-- Tokens verified/created (type, scope, owner)
-- Webhooks created/updated (group id, URL, events)
-- Any errors / groups skipped
+**Console Output** containing:
+- Tokens created (name, scope, expiration, **value shown once**)
+- Webhooks created/updated (group path, URL, events)
+- Auto-generated webhook secrets (shown once)
+- Any errors or groups skipped
 
-**Optional Artifact**: `state.json` (previous run cache) to detect drift
+**Optional JSON Report** (`--report` flag):
+- Structured summary of all operations
+- Useful for auditing and automation
 
 ---
 
 ## Token Strategy
 
-Two safe options—pick one at deploy time:
+### Group Access Token per Root Group
 
-### Option A: Group Access Token per Root Group (Recommended)
-
-- **Scope**: `api`
-- **Role**: Developer or above (Owner/Maintainer recommended to manage webhooks)
+- **Scope**: `api` (covers both Qodo Merge and Qodo Aware requirements)
+- **Role**: Maintainer (40) - sufficient for token and webhook management
 - **Coverage**: Works across all projects in the group hierarchy
-- **Least Privilege**: Each root group has its own token
+- **Least Privilege**: Each root group has its own isolated token
+- **Name**: "Qodo AI Integration" (used for idempotent detection)
 
-**Why this works:**
-- Group tokens can act within all group projects
-- `api` scope satisfies both Qodo Aware + Merge requirements
-- Minimal blast radius if compromised
+**Why this approach:**
+- Group tokens are scoped to their group hierarchy only
+- `api` scope includes read_api and read_repository permissions
+- Minimal blast radius if a token is compromised
+- No need for dedicated bot user accounts
 
-### Option B: Single Bot User PAT
-
-- Create a service/bot account
-- Grant it **Owner** on each target root group
-- Issue one **Personal Access Token** with `api` scope
-- **Trade-off**: Broader blast radius vs. simpler distribution
-
-**Implementation Note**: The script detects existing usable tokens first, else creates/rotates appropriately.
+**Token Lifecycle:**
+- Script checks for existing "Qodo AI Integration" token
+- If found and not expired, reuses it (value not retrievable)
+- If missing or expired, creates new token
+- Token value displayed **once** during creation
 
 ---
 
 ## Webhook Strategy
 
-### Group Webhooks (Preferred)
+### Group Webhooks
 
-- Use **Group Webhooks** (not system or project hooks)
-- Apply to **all projects in the group and subgroups**
-- Requires **Owner** role on the group
+- Uses **Group Webhooks** (not system or project hooks)
+- Applies to **all projects in the group and subgroups automatically**
+- Requires **Owner** role on the group (script validates this)
 
-### Required Events
+### Configured Events
 
-Typical for Qodo integration:
-- `merge_requests` (open/update/merge/close)
-- `note` (comments on MRs)
-- `pipeline` (if Qodo listens for pipeline status)
-- `push` (optional, if Qodo wants push events for context)
+Current implementation enables:
+- `merge_requests_events`: true (open/update/merge/close)
+- `note_events`: true (comments on MRs)
+- `push_events`: false (not required by Qodo)
+- `pipeline_events`: false (not required by Qodo)
 
 ### Configuration
 
-- `url`: Qodo Merge webhook endpoint from your single-tenant deployment
-- `token`: Secret for signature verification
-- `enable_ssl_verification`: true (unless using custom CA)
+- `url`: Qodo webhook endpoint from configuration
+- `token`: Auto-generated secure random secret (or user-provided)
+- `enable_ssl_verification`: true
+- `name`: "Qodo AI Integration"
 
-### API Operations
+### Idempotent Operations
 
-Create/update via **Group Webhooks API**:
-1. List existing hooks
-2. Compare with desired configuration
-3. Create or patch as needed
+1. List existing group webhooks
+2. Find webhook with matching URL
+3. If not found → create new webhook
+4. If found but config differs → update webhook
+5. If found and matches → no action
 
 ---
 
@@ -145,18 +137,17 @@ Create/update via **Group Webhooks API**:
 - Supports group tokens and PATs
 
 ### Groups Traversal
-- `GET /groups/:id/subgroups` (paginate) — recursively walk the tree
+- `GET /groups/:id/subgroups?per_page=100` — recursively walk the tree with pagination
 
 ### Group Access Tokens
-- `GET /groups/:id/access_tokens` — find existing usable tokens
+- `GET /groups/:id/access_tokens` — find existing "Qodo AI Integration" token
 - `POST /groups/:id/access_tokens` — create if missing
-  - Parameters: `name`, `scopes`, `access_level`, `expires_at` (optional)
+  - Parameters: `name`, `scopes`, `access_level`, `expires_at`
 
 ### Group Webhooks
 - `GET /groups/:id/hooks` — list existing webhooks
 - `POST /groups/:id/hooks` — create new webhook
 - `PUT /groups/:id/hooks/:hook_id` — update existing webhook
-- `DELETE /groups/:id/hooks/:hook_id` — remove webhook (cleanup)
 
 ---
 
@@ -165,370 +156,153 @@ Create/update via **Group Webhooks API**:
 ### High-Level Flow (Idempotent)
 
 1. **Load Configuration**
-   - Validate base URL and credentials
-   - Parse root groups and webhook settings
+   - Parse YAML configuration file
+   - Validate required fields (base URL, root groups, webhook URL)
+   - Auto-generate webhook secret if not provided
 
-2. **Auth Check**
-   - Call `/user` to verify token works + scopes
-   - Optional self-test
+2. **Authentication Check**
+   - Verify `GITLAB_ADMIN_TOKEN` environment variable
+   - Call `/user` to validate token and check scopes
+   - Verify token has `api` scope
 
 3. **Resolve Root Group IDs**
-   - From paths if needed (`GET /groups?search=`)
-   - Verify Owner access
+   - Convert group paths to IDs if needed
+   - Verify Owner access on each root group
+   - Exit if insufficient permissions
 
 4. **For Each Root Group**:
    
-   **A. Ensure Token**:
-   - If `auth_mode=group_token_per_root_group`:
-     - `GET /groups/:id/access_tokens`
-     - Search for non-expired token named `Qodo-Integration`
-     - If not found, `POST /groups/:id/access_tokens` with `scopes=["api"]`
-     - Record token value securely (only visible once)
-   - If `auth_mode=bot_user_pat`:
-     - Validate the PAT once
+   **A. Ensure Group Token**:
+   - `GET /groups/:id/access_tokens`
+   - Search for non-expired token named "Qodo AI Integration"
+   - If not found:
+     - `POST /groups/:id/access_tokens` with `scopes=["api"]`, `access_level=40`
+     - Display token value (only time it's visible)
+     - Store token metadata for reporting
+   - If found: Skip (value not retrievable)
    
-   **B. Traverse Subgroups**:
-   - `GET /groups/:id/subgroups` (paginate)
-   - Breadth-first traversal
-   - Enqueue children
-   
-   **C. For Each Group (Root + Subgroups)**:
-   - **Webhook Ensure**:
-     - `GET /groups/:id/hooks`
-     - Find hook with matching URL
-     - If missing → `POST /groups/:id/hooks`
-     - If present but mismatched → `PUT /groups/:id/hooks/:hook_id`
+   **B. Ensure Group Webhook**:
+   - `GET /groups/:id/hooks`
+   - Find hook with matching URL
+   - Compare configuration (events, SSL, token)
+   - If missing → `POST /groups/:id/hooks`
+   - If mismatched → `PUT /groups/:id/hooks/:hook_id`
+   - If matched → Skip
+   - **Note**: Group webhooks automatically inherit to all subgroups and projects
 
-5. **Report**
-   - Print JSON summary of created/updated/unchanged items
+5. **Report Results**
+   - Console: Human-readable summary
+   - Optional JSON file: Structured report
+   - Display auto-generated secrets
 
 6. **Exit Codes**
-   - 0 = success/idempotent
-   - 2 = partial (some groups skipped)
-   - 3 = auth/permission failure
+   - 0 = success (all groups processed)
+   - 2 = partial (some groups skipped due to permissions)
+   - 3 = authentication/permission failure
 
-### Pseudocode
+### Implementation Notes
 
-```python
-def ensure_group_token(group_id):
-    if auth_mode == "bot_user_pat":
-        return None  # PAT already set in header
-    
-    tokens = gitlab.get(f"/groups/{group_id}/access_tokens")
-    tok = find_valid_token(tokens, name="Qodo-Integration", scopes=["api"])
-    
-    if tok:
-        return None  # already have one; value not retrievable
-    
-    # Create new token (value returned once)
-    payload = {
-        "name": "Qodo-Integration",
-        "scopes": ["api"],
-        "access_level": 40  # maintainer+
-    }
-    created = gitlab.post(f"/groups/{group_id}/access_tokens", json=payload)
-    secure_store(created["token"])  # value present here only once
+**Token Management:**
+- Tokens are created with expiration date (configurable, default 365 days)
+- Token value is only available during creation response
+- Script prints token value to console (user must save it)
+- Subsequent runs detect existing token by name
 
-def ensure_group_webhook(group_id, cfg):
-    hooks = gitlab.get(f"/groups/{group_id}/hooks")
-    hook = next((h for h in hooks if h["url"] == cfg.url), None)
-    
-    desired = {
-        "url": cfg.url,
-        "enable_ssl_verification": True,
-        "token": cfg.secret,
-        "merge_requests_events": True,
-        "note_events": True,
-        "pipeline_events": cfg.pipeline,
-        "push_events": cfg.push,
-    }
-    
-    if not hook:
-        gitlab.post(f"/groups/{group_id}/hooks", json=desired)
-    else:
-        if not matches(hook, desired):
-            gitlab.put(f"/groups/{group_id}/hooks/{hook['id']}", json=desired)
+**Webhook Management:**
+- Webhooks are identified by URL (must be unique per group)
+- Configuration comparison checks: URL, events, SSL verification, token
+- Updates preserve webhook ID, only modify configuration
 
-def traverse_groups(root_id):
-    q = [root_id]
-    seen = set()
-    
-    while q:
-        gid = q.pop(0)
-        if gid in seen:
-            continue
-        seen.add(gid)
-        yield gid
-        
-        subs = paginate(f"/groups/{gid}/subgroups")
-        q.extend([s["id"] for s in subs])
-```
+**Group Webhook Inheritance:**
+- GitLab group webhooks automatically apply to all subgroups and projects
+- No need to explicitly traverse and configure each subgroup
+- Simplifies configuration and reduces API calls
+- Ensures consistent webhook configuration across entire group hierarchy
 
 ---
 
-## Data Model
-
-### Token State
-
-```python
-{
-    "name": "Qodo-Integration",
-    "scopes": ["api"],
-    "expires_at": "2025-12-31",
-    "revoked": false,
-    "access_level": 40,
-    "created_at": "2025-01-15T10:00:00Z"
-}
-```
-
-**Considerations**:
-- Auto-rotation window (e.g., rotate if expires within N days)
-- Track creation date for audit
-
-### Webhook State
-
-```python
-{
-    "url": "https://qodo.company.com/webhooks/gitlab",
-    "enable_ssl_verification": true,
-    "push_events": true,
-    "merge_requests_events": true,
-    "note_events": true,
-    "pipeline_events": true,
-    "token": "webhook-secret"
-}
-```
-
-**Comparison Logic**:
-- Compare booleans strictly
-- If any mismatch → update
 
 ---
 
 ## Edge Cases & Guardrails
 
 ### Permissions
-- **Group webhooks require Owner** on each managed group
-- Script should verify permissions before attempting operations
+- **Group webhooks require Owner role** on each managed group
+- Script validates permissions before operations
+- Fails gracefully if insufficient permissions on any group
 
 ### GitLab Tiers
-- **Group webhooks are Premium+**
-- If on Free tier, detect 404 on group hooks API
-- Optional fallback to per-project hooks
+- **Group webhooks require Premium+**
+- Free tier will fail with 404 on group hooks API
+- Script detects this and reports clear error message
 
-### Subgroup Traversal
-- **Do not rely on a single "include_subgroups" flag**
-- Implement recursive traversal with pagination
-- Handle circular references (use `seen` set)
+### Group Webhook Inheritance
+- GitLab group webhooks automatically inherit to all subgroups and projects
+- Script only configures root groups
+- Reduces API calls and configuration complexity
+- Ensures consistent configuration across entire hierarchy
 
 ### Token One-Time Visibility
-- On creation, token value is returned **once**
-- Print/store securely immediately
-- Later queries only show metadata, not value
-
-### Custom CA
-- If self-managed GitLab with custom CA:
-  - Ensure script's HTTP client trusts it
-  - Qodo docs mention sharing CA bundle for Qodo side
+- Token value returned **only** during creation
+- Script prints value to console immediately
+- User must save token value (cannot be retrieved later)
+- Subsequent runs detect token by name, not value
 
 ### Rate Limits
-- Respect `Retry-After` header
-- Implement exponential backoff
-- Add configurable delay between API calls
+- Respects `Retry-After` header from GitLab API
+- Implements exponential backoff (1s, 2s, 4s, 8s, 16s)
+- Maximum 5 retry attempts per request
 
 ### Idempotency
-- **Never create duplicates**
-- Always list & compare first
-- Use deterministic naming (e.g., "Qodo-Integration")
+- Always checks for existing resources before creating
+- Uses deterministic naming: "Qodo AI Integration"
+- Compares configuration before updating
+- Safe to run multiple times
 
 ---
 
 ## Security & Secrets
 
+### Token Security
+
+1. **Token values are printed to console during creation**
+   - User must save them immediately
+   - Cannot be retrieved after creation
+   - Consider redirecting output to secure file
+
+2. **Bootstrap token via environment variable**
+   - `GITLAB_ADMIN_TOKEN` must have Owner permissions
+   - Never commit tokens to version control
+   - Use `.gitignore` for any token files
+
+3. **Webhook secrets**
+   - Auto-generated using `secrets.token_urlsafe(32)`
+   - Cryptographically secure random generation
+   - Printed once during creation
+   - User must configure Qodo with same secret
+
 ### Best Practices
 
-1. **Never log token values**
-   - Mask in logs and output
-   - Only show token IDs or metadata
+1. **Token Lifecycle**
+   - Set appropriate expiration (default 365 days)
+   - Monitor expiration dates
+   - Rotate before expiry by deleting old token and re-running script
 
-2. **Secure Storage Options**
-   - Environment variable
-   - HashiCorp Vault
-   - AWS Secrets Manager
-   - Local encrypted file (`age`/`sops`)
+2. **Dry Run First**
+   - Always test with `--dry-run` before production
+   - Verify configuration without making changes
 
-3. **Token Rotation**
-   - Output both old token expiry and new token ID
-   - Never output token value in rotation logs
+3. **Audit Trail**
+   - Use `--report` flag to generate JSON audit log
+   - Store reports for compliance and troubleshooting
 
-4. **CLI Guards**
-   - Optional `--print-token-once` flag
-   - Prevent accidental CI logs
-   - Require explicit confirmation for sensitive operations
-
-### Secrets Handling
-
-```python
-def secure_store(token_value, group_id):
-    """Store token securely based on configuration"""
-    backend = config.get("secrets_backend", "env")
-    
-    if backend == "vault":
-        vault_client.write(f"secret/qodo/gitlab/{group_id}", token=token_value)
-    elif backend == "aws_sm":
-        sm_client.put_secret_value(SecretId=f"qodo-gitlab-{group_id}", SecretString=token_value)
-    elif backend == "env":
-        print(f"QODO_GITLAB_TOKEN_{group_id}={token_value}")
-    else:
-        raise ValueError(f"Unknown secrets backend: {backend}")
-```
+4. **Least Privilege**
+   - Each root group gets its own token
+   - Tokens scoped to group hierarchy only
+   - Limits blast radius if compromised
 
 ---
 
-## CLI Usage
-
-### Basic Command
-
-```bash
-qodo-gitlab-install \
-  --config ./config.yaml \
-  --auth-mode group_token_per_root_group \
-  --dry-run=false \
-  --state ./state.json \
-  --report ./report.json
-```
-
-### Environment Variables
-
-**Option 1: Bootstrap Token**
-```bash
-export GITLAB_ADMIN_TOKEN="glpat-xxxxxxxxxxxx"
-```
-
-**Option 2: Bot PAT**
-```bash
-export GITLAB_BOT_PAT="glpat-xxxxxxxxxxxx"
-```
-
-### Examples
-
-**Dry Run (No Changes)**
-```bash
-python qodo_gitlab_install.py --config config.yaml --dry-run
-```
-
-**Production Run**
-```bash
-python qodo_gitlab_install.py --config config.yaml
-```
-
-**Debug Mode**
-```bash
-python qodo_gitlab_install.py --config config.yaml --log-level debug
-```
-
-**With State Tracking**
-```bash
-python qodo_gitlab_install.py \
-  --config config.yaml \
-  --state ./state.json \
-  --report ./report.json
-```
-
----
-
-## Testing
-
-### Unit Tests
-
-- **Comparison Logic**: Existing vs desired hook configuration
-- **Recursion**: Subgroup traversal with cycles
-- **Pagination**: Handling large result sets
-- **Dry-Run**: No actual API calls made
-
-### Integration Tests (Sandbox Group)
-
-1. **Fresh Install**
-   - Create from scratch
-   - Verify webhooks & token exist
-   - Check correct scopes and events
-
-2. **Idempotency**
-   - Run again
-   - Verify no changes made
-
-3. **Update Scenario**
-   - Change events/secret in config
-   - Run script
-   - Verify updates applied
-
-4. **Permission Failure**
-   - Remove Owner on a subgroup
-   - Verify graceful failure
-   - Verify other groups continue
-
-### Security Tests
-
-- Confirm tokens never appear in logs
-- Verify secret masking works
-- Test token rotation without leaks
-
-### Test Environment Requirements
-
-1. Test GitLab group hierarchy:
-   - Two levels of subgroups
-   - A couple of projects per group
-
-2. Qodo single-tenant webhook URL + recommended event list
-
-3. Decision on token strategy (Option A vs B)
-
-4. Secrets backend (Vault/AWS SM) for token storage
-
-5. Non-prod GitLab user with Owner on test groups
-
----
-
-## Acceptance Criteria
-
-✅ **For each configured root group (and all subgroups)**:
-- Exactly **one** webhook exists with correct URL, events, SSL, and secret
-- Exactly **one** token strategy in place:
-  - **Option A**: One group access token (scope `api`) per root group
-  - **Option B**: A single bot PAT (scope `api`) managing all target groups
-
-✅ **Re-running the script makes no changes** (idempotent)
-
-✅ **Free tier fallback**: Script can create project-level hooks when group hooks unavailable
-
-✅ **JSON report** lists all actions with clear failure explanations
-
-✅ **Security**: No token values in logs, secure storage integration works
-
-✅ **Error Handling**: Graceful degradation, clear error messages, appropriate exit codes
-
----
-
-## Implementation Checklist
-
-- [ ] Core script structure
-- [ ] Configuration parsing (YAML)
-- [ ] GitLab API client with auth
-- [ ] Group traversal (recursive, paginated)
-- [ ] Token management (create/verify)
-- [ ] Webhook management (create/update)
-- [ ] Idempotency checks
-- [ ] Dry-run mode
-- [ ] JSON reporting
-- [ ] State file support
-- [ ] Secrets backend integration
-- [ ] Error handling & logging
-- [ ] Rate limiting & backoff
-- [ ] Unit tests
-- [ ] Integration tests
-- [ ] Documentation (README.md)
-- [ ] CLI argument parsing
-- [ ] Exit codes
 
 ---
 

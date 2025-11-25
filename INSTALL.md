@@ -58,13 +58,7 @@ python qodo_gitlab_install.py --config config.yaml --dry-run
 python qodo_gitlab_install.py --config config.yaml
 ```
 
-**Save the output**: Token values and auto-generated webhook secrets are shown only once.
-
-## Step 7: Generate Report (Optional)
-
-```bash
-python qodo_gitlab_install.py --config config.yaml --report report.json
-```
+**Important**: Save the output immediately. Token values and auto-generated webhook secrets are displayed only once and cannot be retrieved later.
 
 ## Troubleshooting
 

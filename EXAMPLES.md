@@ -3,63 +3,32 @@
 ## Single Root Group
 
 ```yaml
+gitlab_base_url: "https://gitlab.company.com"
+auth_mode: "group_token_per_root_group"
 root_groups:
   - "engineering"
+webhooks:
+  merge_request_url: "https://qodo.company.com/webhooks/gitlab"
 ```
 
-Creates token for "engineering" and webhooks on all subgroups.
+Creates token for "engineering" group and configures webhook (automatically applies to all subgroups).
 
 ## Multiple Root Groups
 
 ```yaml
+gitlab_base_url: "https://gitlab.company.com"
+auth_mode: "group_token_per_root_group"
 root_groups:
   - "engineering"
   - "product"
   - "design"
+webhooks:
+  merge_request_url: "https://qodo.company.com/webhooks/gitlab"
 ```
 
-Creates token per group and webhooks on all subgroups.
+Creates one token per root group and configures webhooks (automatically apply to all subgroups).
 
-## Bot User PAT Mode
-
-```yaml
-auth_mode: "bot_user_pat"
-root_groups:
-  - "engineering"
-```
-
-```bash
-export GITLAB_BOT_PAT="glpat-xxxxxxxxxxxx"
-python qodo_gitlab_install.py --config config.yaml
-```
-
-Uses single bot PAT, no new tokens created.
-
-## Dry Run
-
-```bash
-python test_connection.py
-python qodo_gitlab_install.py --config config.yaml --dry-run
-python qodo_gitlab_install.py --config config.yaml
-```
-
-## Debug Mode
-
-```bash
-python qodo_gitlab_install.py --config config.yaml --log-level debug
-```
-
-## Generate Report
-
-```bash
-python qodo_gitlab_install.py --config config.yaml --report report.json
-```
-
-## Update Webhook Events
-
-Edit `config.yaml` to add/remove events, then re-run. Script updates existing webhooks.
-
-## Using Group IDs
+## Using Group IDs Instead of Paths
 
 ```yaml
 root_groups:
@@ -67,53 +36,92 @@ root_groups:
   - "67890"
 ```
 
-## CI/CD Integration
+Useful when group paths are ambiguous or contain special characters.
+
+## Custom Token Expiration
 
 ```yaml
-qodo_setup:
-  stage: deploy
-  image: python:3.11
-  script:
-    - pip install -r requirements.txt
-    - python qodo_gitlab_install.py --config config.yaml --report report.json
-  artifacts:
-    paths:
-      - report.json
-  only:
-    - main
-  variables:
-    GITLAB_ADMIN_TOKEN: $QODO_GITLAB_TOKEN
+token_expires_in_days: 180
 ```
 
-## Common Patterns
+Tokens expire after 180 days instead of default 365.
 
-**Test → Dry Run → Execute**
+## Custom Webhook Secret
+
+```yaml
+webhooks:
+  merge_request_url: "https://qodo.company.com/webhooks/gitlab"
+  secret_token: "your-secure-secret-here"
+```
+
+If omitted, a secure random secret is auto-generated.
+
+## Workflow Examples
+
+### Test Connection First
+
 ```bash
 python test_connection.py
+```
+
+Verifies authentication and permissions before running the installer.
+
+### Dry Run Before Execution
+
+```bash
 python qodo_gitlab_install.py --config config.yaml --dry-run
 python qodo_gitlab_install.py --config config.yaml
 ```
 
-**Full Logging**
+Preview changes without modifying GitLab.
+
+### Debug Mode
+
 ```bash
-python qodo_gitlab_install.py --config config.yaml --log-level debug --report report.json 2>&1 | tee install.log
+python qodo_gitlab_install.py --config config.yaml --log-level debug
 ```
 
-**Cron Job**
+Shows detailed API calls and responses.
+
+### Generate JSON Report
+
 ```bash
-0 2 * * * python qodo_gitlab_install.py --config /path/to/config.yaml --report /var/log/qodo/report-$(date +%Y%m%d).json
+python qodo_gitlab_install.py --config config.yaml --report report.json
+```
+
+Saves structured output for auditing or automation.
+
+### Full Logging to File
+
+```bash
+python qodo_gitlab_install.py --config config.yaml --log-level debug 2>&1 | tee install.log
 ```
 
 ## Troubleshooting
 
-**"Group not found"**
+### "Group not found"
+
+Verify the group exists and your token has access:
+
 ```bash
-curl -H "PRIVATE-TOKEN: $GITLAB_ADMIN_TOKEN" "https://gitlab.company.com/api/v4/groups?search=engineering"
+curl -H "PRIVATE-TOKEN: $GITLAB_ADMIN_TOKEN" \
+  "https://gitlab.company.com/api/v4/groups?search=engineering"
 ```
 
-**"Cannot manage webhooks"**
+### "Cannot manage webhooks"
+
+Check for Owner permissions:
+
 ```bash
-python test_connection.py  # Check for Owner access warning
+python test_connection.py
 ```
 
-**Rate limiting**: Script auto-retries. Run during off-peak hours if needed.
+Look for warnings about insufficient permissions.
+
+### Rate Limiting
+
+Script automatically retries with exponential backoff. If issues persist, run during off-peak hours.
+
+### Token Already Exists
+
+Script detects existing "Qodo AI Integration" tokens and reuses them. To force recreation, manually delete the old token first.
