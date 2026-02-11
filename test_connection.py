@@ -112,6 +112,63 @@ def test_group_access(base_url: str, token: str, group_path: str):
         return False
 
 
+def test_project_access(base_url: str, token: str, project_path_or_id: str):
+    """Test access to a specific project"""
+    print(f"\nTesting access to project '{project_path_or_id}'...")
+
+    try:
+        # Resolve project: try by ID first, then by path
+        if project_path_or_id.isdigit():
+            url = f"{base_url}/api/v4/projects/{project_path_or_id}"
+        else:
+            from urllib.parse import quote
+            encoded = quote(project_path_or_id, safe='')
+            url = f"{base_url}/api/v4/projects/{encoded}"
+
+        response = requests.get(url, headers={'PRIVATE-TOKEN': token})
+        response.raise_for_status()
+        project = response.json()
+
+        print(f"✅ Project found!")
+        print(f"   ID: {project['id']}")
+        print(f"   Name: {project['name']}")
+        print(f"   Path: {project.get('path_with_namespace', '')}")
+
+        # Check if we can list access tokens (requires Maintainer+)
+        try:
+            response = requests.get(
+                f"{base_url}/api/v4/projects/{project['id']}/access_tokens",
+                headers={'PRIVATE-TOKEN': token}
+            )
+            response.raise_for_status()
+            print(f"✅ Can manage project access tokens (Maintainer+ access)")
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 403:
+                print(f"⚠️  Cannot manage project access tokens (need Maintainer+ access)")
+            else:
+                print(f"⚠️  Token management check failed: {e}")
+
+        # Check if we can list webhooks (requires Maintainer+)
+        try:
+            response = requests.get(
+                f"{base_url}/api/v4/projects/{project['id']}/hooks",
+                headers={'PRIVATE-TOKEN': token}
+            )
+            response.raise_for_status()
+            print(f"✅ Can manage project webhooks (Maintainer+ access)")
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 403:
+                print(f"⚠️  Cannot manage project webhooks (need Maintainer+ access)")
+            else:
+                print(f"⚠️  Webhook check failed: {e}")
+
+        return True
+
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Failed to access project: {e}")
+        return False
+
+
 def main():
     """Main test function"""
     print("=" * 80)
@@ -135,30 +192,42 @@ def main():
     try:
         with open(config_path, 'r') as f:
             config = yaml.safe_load(f)
-        
+
         base_url = config['gitlab_base_url'].rstrip('/')
-        root_groups = config['root_groups']
-        
+        root_groups = config.get('root_groups') or []
+        projects = config.get('projects') or []
+
         print(f"✅ Configuration loaded from {config_path}")
         print(f"   GitLab URL: {base_url}")
-        print(f"   Root groups: {', '.join(root_groups)}")
-        
+        if root_groups:
+            print(f"   Root groups: {', '.join(str(g) for g in root_groups)}")
+        if projects:
+            print(f"   Projects: {', '.join(str(p) for p in projects)}")
+        if not root_groups and not projects:
+            print("   ⚠️  No root_groups or projects configured")
+
     except Exception as e:
         print(f"❌ Failed to load configuration: {e}")
         print("   Using manual input...")
         base_url = input("Enter GitLab URL (e.g., https://gitlab.company.com): ").rstrip('/')
         root_groups = [input("Enter a group path to test (e.g., engineering): ")]
-    
+        projects = []
+
     print("\n" + "=" * 80)
-    
+
     # Test connection
     if not test_gitlab_connection(base_url, token):
         return 1
-    
+
     # Test group access
     for group_path in root_groups:
-        if not test_group_access(base_url, token, group_path):
+        if not test_group_access(base_url, token, str(group_path)):
             print(f"\n⚠️  Warning: Issues accessing group '{group_path}'")
+
+    # Test project access
+    for project_entry in projects:
+        if not test_project_access(base_url, token, str(project_entry)):
+            print(f"\n⚠️  Warning: Issues accessing project '{project_entry}'")
     
     print("\n" + "=" * 80)
     print("Test complete!")

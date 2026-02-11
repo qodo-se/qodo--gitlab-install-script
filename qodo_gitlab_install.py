@@ -669,6 +669,7 @@ class QodoGitLabInstaller:
                 'merge_requests_events': True,
                 'note_events': True,
                 'pipeline_events': False,
+                'name': 'Qodo AI Integration',
             }
 
             existing_hook = None
@@ -770,12 +771,13 @@ class QodoGitLabInstaller:
             created_token = self.ensure_project_token(project_id)
 
             # Create project webhook
-            self.ensure_project_webhook(project_id)
+            webhook_ok = self.ensure_project_webhook(project_id)
 
-            # Build summary
-            self.build_project_configuration_summary(project_id, created_token, covered_by_group)
-
-            self.report.projects_processed += 1
+            if webhook_ok:
+                self.build_project_configuration_summary(project_id, created_token, covered_by_group)
+                self.report.projects_processed += 1
+            else:
+                self.report.projects_skipped += 1
 
         except Exception as e:
             logger.error(f"Project {project_path_or_id}: Processing failed: {e}")
@@ -1167,8 +1169,16 @@ def load_config(config_path: str) -> Config:
         secret_token=data['webhooks'].get('secret_token')  # Optional - auto-generated if not provided
     )
 
-    root_groups = data.get('root_groups', [])
-    projects = data.get('projects', [])
+    root_groups = data.get('root_groups') or []
+    projects = data.get('projects') or []
+
+    if not isinstance(root_groups, list):
+        raise ValueError("'root_groups' must be a list")
+    if not isinstance(projects, list):
+        raise ValueError("'projects' must be a list")
+
+    root_groups = [str(x) for x in root_groups]
+    projects = [str(x) for x in projects]
 
     if not root_groups and not projects:
         raise ValueError("Configuration must specify at least one of 'root_groups' or 'projects'")
