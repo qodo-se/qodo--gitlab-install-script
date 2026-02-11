@@ -3,8 +3,9 @@
 ## Prerequisites
 
 - Python 3.8+
-- GitLab Owner permissions on target groups
-- GitLab Premium+ (for group webhooks)
+- GitLab Owner permissions on target groups (for group webhooks)
+- GitLab Maintainer+ permissions on target projects (for project tokens)
+- GitLab Premium+ for group webhooks (project webhooks work on all tiers)
 - Qodo webhook endpoint URL
 
 ## Step 1: Install Dependencies
@@ -25,10 +26,12 @@ pip install -r requirements.txt
 
 ```bash
 cp config.example.yaml config.yaml
-# Edit config.yaml with your GitLab URL, groups, and Qodo webhook endpoint
+# Edit config.yaml with your GitLab URL, groups and/or projects, and Qodo webhook endpoint
 ```
 
 **Note**: Webhook secret is auto-generated if omitted (recommended).
+
+You can target groups, individual projects, or both. At least one of `root_groups` or `projects` must be specified.
 
 ## Step 3: Set Environment Variable
 
@@ -38,7 +41,7 @@ Set your GitLab access token:
 export GITLAB_ADMIN_TOKEN="glpat-xxxxxxxxxxxx"
 ```
 
-**Important**: This token needs Owner permissions on all target groups.
+**Important**: This token needs Owner permissions on target groups and Maintainer+ permissions on target projects.
 
 ## Step 4: Test Connection (Optional)
 
@@ -46,13 +49,21 @@ export GITLAB_ADMIN_TOKEN="glpat-xxxxxxxxxxxx"
 python test_connection.py
 ```
 
-## Step 5: Dry Run
+## Step 5: Validate Configuration (Optional)
+
+```bash
+python qodo_gitlab_install.py --config config.yaml --check
+```
+
+This checks that all groups/projects exist, permissions are sufficient, and reports current token/webhook state without making any changes.
+
+## Step 6: Dry Run
 
 ```bash
 python qodo_gitlab_install.py --config config.yaml --dry-run
 ```
 
-## Step 6: Run Installation
+## Step 7: Run Installation
 
 ```bash
 python qodo_gitlab_install.py --config config.yaml
@@ -63,7 +74,7 @@ python qodo_gitlab_install.py --config config.yaml
 ## Troubleshooting
 
 ### "Group webhooks not available"
-GitLab Free tier detected. Upgrade to Premium+ or modify script for project-level webhooks.
+GitLab Free tier detected. Use `projects` in your config to target individual projects instead (project webhooks work on all tiers), or upgrade to Premium+ for group webhooks.
 
 ### "Cannot manage group access tokens"
 Token lacks Owner permissions. Request Owner access or use a token from an Owner.

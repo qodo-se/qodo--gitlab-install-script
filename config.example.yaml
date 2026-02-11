@@ -4,10 +4,16 @@ gitlab_base_url: "https://gitlab.company.com"
 # Authentication: "group_token_per_root_group"
 auth_mode: "group_token_per_root_group"
 
-# Group paths or IDs to configure
+# Group paths or IDs to configure (optional if projects is set)
 root_groups:
   - "engineering"
   - "product"
+
+# Individual project paths or IDs (optional if root_groups is set)
+# projects:
+#   - "engineering/backend/auth-service"
+#   - "standalone/external-tool"
+#   - "12345"
 
 # Qodo webhook endpoint
 webhooks:

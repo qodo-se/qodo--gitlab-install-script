@@ -16,11 +16,13 @@
 
 ### What the Script Does
 
-1. **Processes** one or more specified GitLab root groups
-2. **Creates** one group access token per root group with `api` scope
-3. **Configures** group-level webhooks (idempotent create/update) for merge requests and comments
-4. **Leverages** GitLab's group webhook inheritance (webhooks automatically apply to all subgroups and projects)
-5. **Runs safely** every time (idempotent, retryable) and reports changes made
+1. **Processes** one or more specified GitLab root groups and/or individual projects
+2. **Creates** group or project access tokens with `api` scope
+3. **Configures** group-level or project-level webhooks (idempotent create/update) for merge requests and comments
+4. **Leverages** GitLab's group webhook inheritance (group webhooks automatically apply to all subgroups and projects)
+5. **Detects** group coverage overlap when both groups and projects are configured
+6. **Validates** configuration with `--check` mode before making changes
+7. **Runs safely** every time (idempotent, retryable) and reports changes made
 
 ### Background
 
@@ -41,10 +43,15 @@ gitlab_base_url: "https://gitlab.company.com"
 # Authentication strategy (only group_token_per_root_group is supported)
 auth_mode: "group_token_per_root_group"
 
-# Root groups to manage (paths or IDs)
+# Root groups to manage (paths or IDs) - optional if projects is set
 root_groups:
   - "engineering"
   - "product"
+
+# Individual projects (paths or IDs) - optional if root_groups is set
+# projects:
+#   - "engineering/backend/auth-service"
+#   - "standalone/external-tool"
 
 # Webhook configuration
 webhooks:
@@ -149,6 +156,14 @@ Current implementation enables:
 - `POST /groups/:id/hooks` — create new webhook
 - `PUT /groups/:id/hooks/:hook_id` — update existing webhook
 
+### Projects
+- `GET /projects/:id` — get project details (by ID or URL-encoded path)
+- `GET /projects/:id/access_tokens` — find existing project tokens
+- `POST /projects/:id/access_tokens` — create project access token
+- `GET /projects/:id/hooks` — list project webhooks
+- `POST /projects/:id/hooks` — create project webhook
+- `PUT /projects/:id/hooks/:hook_id` — update project webhook
+
 ---
 
 ## Algorithm
@@ -157,7 +172,7 @@ Current implementation enables:
 
 1. **Load Configuration**
    - Parse YAML configuration file
-   - Validate required fields (base URL, root groups, webhook URL)
+   - Validate required fields (base URL, at least one of root_groups/projects, webhook URL)
    - Auto-generate webhook secret if not provided
 
 2. **Authentication Check**
@@ -190,15 +205,44 @@ Current implementation enables:
    - If matched → Skip
    - **Note**: Group webhooks automatically inherit to all subgroups and projects
 
-5. **Report Results**
-   - Console: Human-readable summary
+5. **For Each Project** (if configured):
+
+   **A. Resolve Project ID**:
+   - Convert path to ID via `GET /projects/:encoded_path`
+   - Numeric IDs used directly
+
+   **B. Check Group Coverage**:
+   - Walk up namespace hierarchy to check if covered by configured group webhook
+   - Log warning if covered (project token + webhook still created)
+
+   **C. Ensure Project Token**:
+   - `GET /projects/:id/access_tokens`
+   - Same pattern as group tokens (find by name, create if missing)
+
+   **D. Ensure Project Webhook**:
+   - `GET /projects/:id/hooks` / `POST` / `PUT`
+   - Same configuration as group webhooks
+   - Works on all GitLab tiers (no Premium+ requirement)
+
+6. **Report Results**
+   - Console: Human-readable summary (groups + projects)
    - Optional JSON file: Structured report
    - Display auto-generated secrets
 
-6. **Exit Codes**
-   - 0 = success (all groups processed)
-   - 2 = partial (some groups skipped due to permissions)
+7. **Exit Codes**
+   - 0 = success (all targets processed; or all checks passed in `--check` mode)
+   - 1 = check mode: one or more checks failed
+   - 2 = partial (some groups/projects skipped due to permissions)
    - 3 = authentication/permission failure
+
+### Check Mode (`--check`)
+
+Non-mutating validation that verifies:
+- Authentication works
+- All groups/projects exist and are accessible
+- Permissions are sufficient (can list tokens)
+- Token and webhook state (exists or needs creation)
+- Group coverage overlap detection for projects
 
 ### Implementation Notes
 
@@ -235,12 +279,19 @@ Current implementation enables:
 - **Group webhooks require Premium+**
 - Free tier will fail with 404 on group hooks API
 - Script detects this and reports clear error message
+- **Project webhooks work on all tiers** — use `projects` config for Free tier
 
 ### Group Webhook Inheritance
 - GitLab group webhooks automatically inherit to all subgroups and projects
 - Script only configures root groups
 - Reduces API calls and configuration complexity
 - Ensures consistent configuration across entire hierarchy
+
+### Group/Project Overlap
+- When both `root_groups` and `projects` are configured, the script detects overlap
+- Projects already covered by a group webhook receive a warning
+- Project token and webhook are still created (belt-and-suspenders approach)
+- Use `--check` to identify overlaps before running
 
 ### Token One-Time Visibility
 - Token value returned **only** during creation

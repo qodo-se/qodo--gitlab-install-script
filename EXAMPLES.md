@@ -38,6 +38,46 @@ root_groups:
 
 Useful when group paths are ambiguous or contain special characters.
 
+## Individual Projects
+
+```yaml
+gitlab_base_url: "https://gitlab.company.com"
+auth_mode: "group_token_per_root_group"
+projects:
+  - "engineering/backend/auth-service"
+  - "standalone/external-tool"
+webhooks:
+  merge_request_url: "https://qodo.company.com/webhooks/gitlab"
+```
+
+Creates a project access token and project webhook for each specified project. Useful for GitLab Free tier (no group webhooks) or targeting specific projects.
+
+## Mixed Groups and Projects
+
+```yaml
+gitlab_base_url: "https://gitlab.company.com"
+auth_mode: "group_token_per_root_group"
+root_groups:
+  - "engineering"
+projects:
+  - "standalone/external-tool"
+  - "12345"
+webhooks:
+  merge_request_url: "https://qodo.company.com/webhooks/gitlab"
+```
+
+Processes groups first (with group-level tokens and webhooks), then individual projects. If a project is already covered by a group webhook, a warning is logged but the project token and webhook are still created.
+
+## Using Project IDs
+
+```yaml
+projects:
+  - "12345"
+  - "67890"
+```
+
+Useful when project paths are long or contain special characters.
+
 ## Custom Token Expiration
 
 ```yaml
@@ -65,6 +105,14 @@ python test_connection.py
 ```
 
 Verifies authentication and permissions before running the installer.
+
+### Validate Configuration
+
+```bash
+python qodo_gitlab_install.py --config config.yaml --check
+```
+
+Checks that all groups/projects exist, verifies permissions, and reports token/webhook state without making any changes. Returns exit code 0 if all checks pass, 1 if any fail.
 
 ### Dry Run Before Execution
 
