@@ -462,7 +462,8 @@ class QodoGitLabInstaller:
             # Check if update needed
             if not self.webhook_matches(existing_hook, desired):
                 logger.info(f"Group {group_id}: Updating webhook {existing_hook['id']}")
-                self.client.put(f'/api/v4/groups/{group_id}/hooks/{existing_hook["id"]}', json=desired)
+                update_payload = {k: v for k, v in desired.items() if k != 'token'}
+                self.client.put(f'/api/v4/groups/{group_id}/hooks/{existing_hook["id"]}', json=update_payload)
 
                 self.report.webhooks_updated.append({
                     'group_id': group_id,
@@ -473,6 +474,8 @@ class QodoGitLabInstaller:
 
             # No changes needed
             logger.debug(f"Group {group_id}: Webhook already configured correctly")
+            if self.config.webhooks.secret_token:
+                logger.info(f"Group {group_id}: Note: changing secret_token in config won't rotate the secret on existing webhooks. Delete and recreate the webhook to apply a new secret.")
             self.report.webhooks_unchanged.append({
                 'group_id': group_id,
                 'hook_id': existing_hook['id'],
@@ -704,7 +707,8 @@ class QodoGitLabInstaller:
 
             if not self.webhook_matches(existing_hook, desired):
                 logger.info(f"Project {project_id}: Updating webhook {existing_hook['id']}")
-                self.client.put(f'/api/v4/projects/{project_id}/hooks/{existing_hook["id"]}', json=desired)
+                update_payload = {k: v for k, v in desired.items() if k != 'token'}
+                self.client.put(f'/api/v4/projects/{project_id}/hooks/{existing_hook["id"]}', json=update_payload)
 
                 self.report.webhooks_updated.append({
                     'project_id': project_id,
@@ -714,6 +718,8 @@ class QodoGitLabInstaller:
                 return True, 'updated'
 
             logger.debug(f"Project {project_id}: Webhook already configured correctly")
+            if self.config.webhooks.secret_token:
+                logger.info(f"Project {project_id}: Note: changing secret_token in config won't rotate the secret on existing webhooks. Delete and recreate the webhook to apply a new secret.")
             self.report.webhooks_unchanged.append({
                 'project_id': project_id,
                 'hook_id': existing_hook['id'],
