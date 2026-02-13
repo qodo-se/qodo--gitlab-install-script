@@ -47,6 +47,7 @@ class Config:
     dry_run: bool = False
     log_level: str = "info"
     token_expires_in_days: int = 365  # Default: 1 year
+    create_tokens: bool = True
 
 
 @dataclass
@@ -56,6 +57,7 @@ class ConfigurationSummary:
     group_path: str
     group_access_token: Optional[str]  # Only available when newly created
     personal_access_token_used: bool
+    token_creation_skipped: bool
     webhook_secret: str
     webhook_secret_auto_generated: bool
     webhook_url: str
@@ -67,6 +69,7 @@ class ProjectConfigurationSummary:
     project_id: int
     project_path: str
     project_access_token: Optional[str]
+    token_creation_skipped: bool
     webhook_secret: str
     webhook_url: str
     covered_by_group_webhook: bool
@@ -308,6 +311,10 @@ class QodoGitLabInstaller:
     
     def ensure_group_token(self, group_id: int) -> Optional[str]:
         """Ensure group access token exists"""
+        if not self.config.create_tokens:
+            logger.info(f"Group {group_id}: Skipping token creation (create_tokens: false)")
+            return None
+
         if self.config.auth_mode == "bot_user_pat":
             logger.debug(f"Using bot PAT for group {group_id}")
             return None
@@ -522,6 +529,7 @@ class QodoGitLabInstaller:
             group_path=group_details.get('full_path', str(group_id)),
             group_access_token=group_token if not using_pat else None,
             personal_access_token_used=using_pat,
+            token_creation_skipped=not self.config.create_tokens,
             webhook_secret=self.config.webhooks.secret_token,
             webhook_secret_auto_generated=self.webhook_secret_auto_generated,
             webhook_url=self.config.webhooks.merge_request_url
@@ -572,6 +580,10 @@ class QodoGitLabInstaller:
 
     def ensure_project_token(self, project_id: int) -> Optional[str]:
         """Ensure project access token exists"""
+        if not self.config.create_tokens:
+            logger.info(f"Project {project_id}: Skipping token creation (create_tokens: false)")
+            return None
+
         if self.config.auth_mode == "bot_user_pat":
             logger.debug(f"Using bot PAT for project {project_id}")
             return None
@@ -735,6 +747,7 @@ class QodoGitLabInstaller:
             project_id=project_id,
             project_path=project_details.get('path_with_namespace', str(project_id)),
             project_access_token=project_token,
+            token_creation_skipped=not self.config.create_tokens,
             webhook_secret=self.config.webhooks.secret_token,
             webhook_url=self.config.webhooks.merge_request_url,
             covered_by_group_webhook=covered_by_group
@@ -852,39 +865,47 @@ class QodoGitLabInstaller:
                 message=f"Group ID: {group_id}"
             ))
 
-            # Check permissions (can we list tokens?)
-            try:
-                self.client.get(f'/api/v4/groups/{group_id}/access_tokens')
-                results.append(CheckResult(
-                    target=target, target_type="group",
-                    check_name="permissions", status="pass",
-                    message="Can list access tokens"
-                ))
-            except Exception:
-                results.append(CheckResult(
-                    target=target, target_type="group",
-                    check_name="permissions", status="fail",
-                    message="Cannot list access tokens (Owner role required)"
-                ))
+            # Check permissions and token state
+            if self.config.create_tokens:
+                # Check permissions (can we list tokens?)
+                try:
+                    self.client.get(f'/api/v4/groups/{group_id}/access_tokens')
+                    results.append(CheckResult(
+                        target=target, target_type="group",
+                        check_name="permissions", status="pass",
+                        message="Can list access tokens"
+                    ))
+                except Exception:
+                    results.append(CheckResult(
+                        target=target, target_type="group",
+                        check_name="permissions", status="fail",
+                        message="Cannot list access tokens (Owner role required)"
+                    ))
 
-            # Check token state
-            try:
-                tokens = self.client.get(f'/api/v4/groups/{group_id}/access_tokens')
-                existing = self.find_valid_token(tokens)
-                if existing:
-                    results.append(CheckResult(
-                        target=target, target_type="group",
-                        check_name="token_state", status="pass",
-                        message=f"Token exists (ID: {existing['id']}, expires: {existing.get('expires_at', 'unknown')})"
-                    ))
-                else:
-                    results.append(CheckResult(
-                        target=target, target_type="group",
-                        check_name="token_state", status="warn",
-                        message="No token found (will be created on run)"
-                    ))
-            except Exception:
-                pass  # Already covered by permissions check
+                # Check token state
+                try:
+                    tokens = self.client.get(f'/api/v4/groups/{group_id}/access_tokens')
+                    existing = self.find_valid_token(tokens)
+                    if existing:
+                        results.append(CheckResult(
+                            target=target, target_type="group",
+                            check_name="token_state", status="pass",
+                            message=f"Token exists (ID: {existing['id']}, expires: {existing.get('expires_at', 'unknown')})"
+                        ))
+                    else:
+                        results.append(CheckResult(
+                            target=target, target_type="group",
+                            check_name="token_state", status="warn",
+                            message="No token found (will be created on run)"
+                        ))
+                except Exception:
+                    pass  # Already covered by permissions check
+            else:
+                results.append(CheckResult(
+                    target=target, target_type="group",
+                    check_name="token_state", status="pass",
+                    message="N/A - token creation disabled"
+                ))
 
             # Check webhook state
             try:
@@ -957,39 +978,47 @@ class QodoGitLabInstaller:
                     message=f"Covered by group webhook (group ID: {covering_group})"
                 ))
 
-            # Check permissions
-            try:
-                self.client.get(f'/api/v4/projects/{project_id}/access_tokens')
-                results.append(CheckResult(
-                    target=target, target_type="project",
-                    check_name="permissions", status="pass",
-                    message="Can list access tokens"
-                ))
-            except Exception:
-                results.append(CheckResult(
-                    target=target, target_type="project",
-                    check_name="permissions", status="fail",
-                    message="Cannot list access tokens (Maintainer+ role required)"
-                ))
+            # Check permissions and token state
+            if self.config.create_tokens:
+                # Check permissions
+                try:
+                    self.client.get(f'/api/v4/projects/{project_id}/access_tokens')
+                    results.append(CheckResult(
+                        target=target, target_type="project",
+                        check_name="permissions", status="pass",
+                        message="Can list access tokens"
+                    ))
+                except Exception:
+                    results.append(CheckResult(
+                        target=target, target_type="project",
+                        check_name="permissions", status="fail",
+                        message="Cannot list access tokens (Maintainer+ role required)"
+                    ))
 
-            # Check token state
-            try:
-                tokens = self.client.get(f'/api/v4/projects/{project_id}/access_tokens')
-                existing = self.find_valid_token(tokens)
-                if existing:
-                    results.append(CheckResult(
-                        target=target, target_type="project",
-                        check_name="token_state", status="pass",
-                        message=f"Token exists (ID: {existing['id']}, expires: {existing.get('expires_at', 'unknown')})"
-                    ))
-                else:
-                    results.append(CheckResult(
-                        target=target, target_type="project",
-                        check_name="token_state", status="warn",
-                        message="No token found (will be created on run)"
-                    ))
-            except Exception:
-                pass
+                # Check token state
+                try:
+                    tokens = self.client.get(f'/api/v4/projects/{project_id}/access_tokens')
+                    existing = self.find_valid_token(tokens)
+                    if existing:
+                        results.append(CheckResult(
+                            target=target, target_type="project",
+                            check_name="token_state", status="pass",
+                            message=f"Token exists (ID: {existing['id']}, expires: {existing.get('expires_at', 'unknown')})"
+                        ))
+                    else:
+                        results.append(CheckResult(
+                            target=target, target_type="project",
+                            check_name="token_state", status="warn",
+                            message="No token found (will be created on run)"
+                        ))
+                except Exception:
+                    pass
+            else:
+                results.append(CheckResult(
+                    target=target, target_type="project",
+                    check_name="token_state", status="pass",
+                    message="N/A - token creation disabled"
+                ))
 
             # Check webhook state
             try:
@@ -1040,6 +1069,9 @@ class QodoGitLabInstaller:
     def run(self) -> int:
         """Main execution flow"""
         logger.info("Starting Qodo GitLab integration setup")
+
+        if not self.config.create_tokens:
+            logger.info("Token creation disabled — only webhooks will be configured.")
 
         # Verify authentication
         if not self.verify_auth():
@@ -1101,7 +1133,9 @@ class QodoGitLabInstaller:
             print(f"--- Root Group {idx}: {summary.group_path} ---")
             print(f"  Group ID:          {summary.group_id}")
             
-            if summary.personal_access_token_used:
+            if summary.token_creation_skipped:
+                print(f"  Access Token:      Skipped (token creation disabled)")
+            elif summary.personal_access_token_used:
                 print(f"  Access Token:      Using Personal Access Token (from environment)")
                 print(f"                     Value: {self.gitlab_token[:8]}...{self.gitlab_token[-4:]}")
                 print(f"                     Scopes: api, read_repository")
@@ -1127,7 +1161,9 @@ class QodoGitLabInstaller:
             if summary.covered_by_group_webhook:
                 print(f"  Group Coverage:    Covered by group webhook (project webhook also configured)")
 
-            if summary.project_access_token:
+            if summary.token_creation_skipped:
+                print(f"  Project Token:     Skipped (token creation disabled)")
+            elif summary.project_access_token:
                 print(f"  Project Token:     {summary.project_access_token}")
                 print(f"                     ⚠️  SAVE THIS - shown only once!")
             else:
@@ -1191,7 +1227,8 @@ def load_config(config_path: str) -> Config:
         projects=projects,
         dry_run=data.get('dry_run', False),
         log_level=data.get('log_level', 'info'),
-        token_expires_in_days=data.get('token_expires_in_days', 365)
+        token_expires_in_days=data.get('token_expires_in_days', 365),
+        create_tokens=data.get('create_tokens', True)
     )
 
 
