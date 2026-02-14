@@ -23,6 +23,9 @@ webhooks:
 # Token expiration (days)
 token_expires_in_days: 365
 
+# Set to false to skip token creation and only configure webhooks
+# create_tokens: true
+
 # Execution options
 dry_run: false
 log_level: "info"

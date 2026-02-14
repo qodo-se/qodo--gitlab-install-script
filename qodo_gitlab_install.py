@@ -14,7 +14,7 @@ import secrets
 import sys
 import time
 from dataclasses import dataclass, asdict, field
-from typing import List, Dict, Any, Optional, Set
+from typing import List, Dict, Any, Optional, Set, Tuple
 from urllib.parse import urljoin, quote
 
 import requests
@@ -47,6 +47,7 @@ class Config:
     dry_run: bool = False
     log_level: str = "info"
     token_expires_in_days: int = 365  # Default: 1 year
+    create_tokens: bool = True
 
 
 @dataclass
@@ -56,7 +57,8 @@ class ConfigurationSummary:
     group_path: str
     group_access_token: Optional[str]  # Only available when newly created
     personal_access_token_used: bool
-    webhook_secret: str
+    token_creation_skipped: bool
+    webhook_secret: Optional[str]  # None means webhook was unchanged (secret set during initial creation)
     webhook_secret_auto_generated: bool
     webhook_url: str
 
@@ -67,7 +69,9 @@ class ProjectConfigurationSummary:
     project_id: int
     project_path: str
     project_access_token: Optional[str]
-    webhook_secret: str
+    token_creation_skipped: bool
+    webhook_secret: Optional[str]  # None means webhook was unchanged (secret set during initial creation)
+    webhook_secret_auto_generated: bool
     webhook_url: str
     covered_by_group_webhook: bool
 
@@ -213,12 +217,7 @@ class QodoGitLabInstaller:
         self.client = GitLabClient(config.gitlab_base_url, gitlab_token, config.dry_run)
         self.gitlab_token = gitlab_token  # Store for configuration summary
         
-        # Auto-generate webhook secret if not provided
-        self.webhook_secret_auto_generated = False
-        if not self.config.webhooks.secret_token:
-            self.config.webhooks.secret_token = self._generate_webhook_secret()
-            self.webhook_secret_auto_generated = True
-            logger.info("Auto-generated webhook secret (cryptographically secure)")
+        self.webhook_secret_auto_generated = not self.config.webhooks.secret_token
         
         self.report = ActionReport(
             tokens_created=[],
@@ -308,6 +307,10 @@ class QodoGitLabInstaller:
     
     def ensure_group_token(self, group_id: int) -> Optional[str]:
         """Ensure group access token exists"""
+        if not self.config.create_tokens:
+            logger.info(f"Group {group_id}: Skipping token creation (create_tokens: false)")
+            return None
+
         if self.config.auth_mode == "bot_user_pat":
             logger.debug(f"Using bot PAT for group {group_id}")
             return None
@@ -405,7 +408,6 @@ class QodoGitLabInstaller:
             'merge_requests_events',
             'note_events',
             'pipeline_events',
-            'token'
         ]
         
         for field in fields_to_check:
@@ -415,18 +417,21 @@ class QodoGitLabInstaller:
         
         return True
     
-    def ensure_group_webhook(self, group_id: int) -> bool:
-        """Ensure group webhook exists with correct configuration"""
+    def ensure_group_webhook(self, group_id: int, webhook_secret: str) -> Tuple[bool, str]:
+        """Ensure group webhook exists with correct configuration.
+
+        Returns (success, status) where status is 'created', 'updated', 'unchanged', or 'error'.
+        """
         try:
             # Get existing hooks
             hooks = self.client.get(f'/api/v4/groups/{group_id}/hooks')
-            
+
             # Build desired configuration with only merge_requests and note events enabled
             # Qodo Merge requires merge request and comment events for AI-powered code reviews
             desired = {
                 'url': self.config.webhooks.merge_request_url,
                 'enable_ssl_verification': True,
-                'token': self.config.webhooks.secret_token,
+                'token': webhook_secret,
                 'push_events': False,
                 'merge_requests_events': True,
                 'note_events': True,
@@ -434,47 +439,50 @@ class QodoGitLabInstaller:
                 'name': 'Qodo AI Integration',
                 'description': 'Qodo provides AI-powered code intelligence for merge requests and context-aware code indexing. This webhook enables Qodo Merge for MR reviews and Qodo Aware for repository analysis.',
             }
-            
+
             # Find existing hook with matching URL
             existing_hook = None
             for hook in hooks:
                 if hook['url'] == desired['url']:
                     existing_hook = hook
                     break
-            
+
             if not existing_hook:
                 # Create new webhook
                 logger.info(f"Group {group_id}: Creating webhook")
                 created = self.client.post(f'/api/v4/groups/{group_id}/hooks', json=desired)
-                
+
                 self.report.webhooks_created.append({
                     'group_id': group_id,
                     'hook_id': created.get('id') if not self.config.dry_run else 'dry_run',
                     'url': desired['url']
                 })
-                return True
-            
+                return True, 'created'
+
             # Check if update needed
             if not self.webhook_matches(existing_hook, desired):
                 logger.info(f"Group {group_id}: Updating webhook {existing_hook['id']}")
-                self.client.put(f'/api/v4/groups/{group_id}/hooks/{existing_hook["id"]}', json=desired)
-                
+                update_payload = {k: v for k, v in desired.items() if k != 'token'}
+                self.client.put(f'/api/v4/groups/{group_id}/hooks/{existing_hook["id"]}', json=update_payload)
+
                 self.report.webhooks_updated.append({
                     'group_id': group_id,
                     'hook_id': existing_hook['id'],
                     'url': desired['url']
                 })
-                return True
-            
+                return True, 'updated'
+
             # No changes needed
             logger.debug(f"Group {group_id}: Webhook already configured correctly")
+            if self.config.webhooks.secret_token:
+                logger.info(f"Group {group_id}: Note: changing secret_token in config won't rotate the secret on existing webhooks. Delete and recreate the webhook to apply a new secret.")
             self.report.webhooks_unchanged.append({
                 'group_id': group_id,
                 'hook_id': existing_hook['id'],
                 'url': desired['url']
             })
-            return True
-            
+            return True, 'unchanged'
+
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 404:
                 logger.warning(f"Group {group_id}: Group webhooks not available (Premium+ feature)")
@@ -490,7 +498,7 @@ class QodoGitLabInstaller:
                     'operation': 'ensure_webhook',
                     'error': str(e)
                 })
-            return False
+            return False, 'error'
         except Exception as e:
             logger.error(f"Group {group_id}: Failed to ensure webhook: {e}")
             self.report.errors.append({
@@ -498,7 +506,7 @@ class QodoGitLabInstaller:
                 'operation': 'ensure_webhook',
                 'error': str(e)
             })
-            return False
+            return False, 'error'
     
     def get_group_details(self, group_id: int) -> Optional[Dict]:
         """Get group details including path"""
@@ -508,25 +516,26 @@ class QodoGitLabInstaller:
             logger.warning(f"Failed to get details for group {group_id}: {e}")
             return None
     
-    def build_configuration_summary(self, group_id: int, group_token: Optional[str] = None):
+    def build_configuration_summary(self, group_id: int, group_token: Optional[str] = None, webhook_secret: Optional[str] = None):
         """Build configuration summary for a root group"""
         group_details = self.get_group_details(group_id)
         if not group_details:
             return
-        
+
         # Determine which token to report
         using_pat = self.config.auth_mode == "bot_user_pat"
-        
+
         summary = ConfigurationSummary(
             group_id=group_id,
             group_path=group_details.get('full_path', str(group_id)),
             group_access_token=group_token if not using_pat else None,
             personal_access_token_used=using_pat,
-            webhook_secret=self.config.webhooks.secret_token,
+            token_creation_skipped=not self.config.create_tokens,
+            webhook_secret=webhook_secret,
             webhook_secret_auto_generated=self.webhook_secret_auto_generated,
             webhook_url=self.config.webhooks.merge_request_url
         )
-        
+
         self.report.configuration_summary.append(summary)
     
     def resolve_project_id(self, project_path_or_id: str) -> Optional[int]:
@@ -572,6 +581,10 @@ class QodoGitLabInstaller:
 
     def ensure_project_token(self, project_id: int) -> Optional[str]:
         """Ensure project access token exists"""
+        if not self.config.create_tokens:
+            logger.info(f"Project {project_id}: Skipping token creation (create_tokens: false)")
+            return None
+
         if self.config.auth_mode == "bot_user_pat":
             logger.debug(f"Using bot PAT for project {project_id}")
             return None
@@ -656,15 +669,18 @@ class QodoGitLabInstaller:
             })
             return None
 
-    def ensure_project_webhook(self, project_id: int) -> bool:
-        """Ensure project webhook exists with correct configuration"""
+    def ensure_project_webhook(self, project_id: int, webhook_secret: str) -> Tuple[bool, str]:
+        """Ensure project webhook exists with correct configuration.
+
+        Returns (success, status) where status is 'created', 'updated', 'unchanged', or 'error'.
+        """
         try:
             hooks = self.client.get(f'/api/v4/projects/{project_id}/hooks')
 
             desired = {
                 'url': self.config.webhooks.merge_request_url,
                 'enable_ssl_verification': True,
-                'token': self.config.webhooks.secret_token,
+                'token': webhook_secret,
                 'push_events': False,
                 'merge_requests_events': True,
                 'note_events': True,
@@ -687,26 +703,29 @@ class QodoGitLabInstaller:
                     'hook_id': created.get('id') if not self.config.dry_run else 'dry_run',
                     'url': desired['url']
                 })
-                return True
+                return True, 'created'
 
             if not self.webhook_matches(existing_hook, desired):
                 logger.info(f"Project {project_id}: Updating webhook {existing_hook['id']}")
-                self.client.put(f'/api/v4/projects/{project_id}/hooks/{existing_hook["id"]}', json=desired)
+                update_payload = {k: v for k, v in desired.items() if k != 'token'}
+                self.client.put(f'/api/v4/projects/{project_id}/hooks/{existing_hook["id"]}', json=update_payload)
 
                 self.report.webhooks_updated.append({
                     'project_id': project_id,
                     'hook_id': existing_hook['id'],
                     'url': desired['url']
                 })
-                return True
+                return True, 'updated'
 
             logger.debug(f"Project {project_id}: Webhook already configured correctly")
+            if self.config.webhooks.secret_token:
+                logger.info(f"Project {project_id}: Note: changing secret_token in config won't rotate the secret on existing webhooks. Delete and recreate the webhook to apply a new secret.")
             self.report.webhooks_unchanged.append({
                 'project_id': project_id,
                 'hook_id': existing_hook['id'],
                 'url': desired['url']
             })
-            return True
+            return True, 'unchanged'
 
         except Exception as e:
             logger.error(f"Project {project_id}: Failed to ensure webhook: {e}")
@@ -715,7 +734,7 @@ class QodoGitLabInstaller:
                 'operation': 'ensure_project_webhook',
                 'error': str(e)
             })
-            return False
+            return False, 'error'
 
     def get_project_details(self, project_id: int) -> Optional[Dict]:
         """Get project details including path"""
@@ -725,7 +744,7 @@ class QodoGitLabInstaller:
             logger.warning(f"Failed to get details for project {project_id}: {e}")
             return None
 
-    def build_project_configuration_summary(self, project_id: int, project_token: Optional[str] = None, covered_by_group: bool = False):
+    def build_project_configuration_summary(self, project_id: int, project_token: Optional[str] = None, webhook_secret: Optional[str] = None, covered_by_group: bool = False):
         """Build configuration summary for a project"""
         project_details = self.get_project_details(project_id)
         if not project_details:
@@ -735,7 +754,9 @@ class QodoGitLabInstaller:
             project_id=project_id,
             project_path=project_details.get('path_with_namespace', str(project_id)),
             project_access_token=project_token,
-            webhook_secret=self.config.webhooks.secret_token,
+            token_creation_skipped=not self.config.create_tokens,
+            webhook_secret=webhook_secret,
+            webhook_secret_auto_generated=self.webhook_secret_auto_generated,
             webhook_url=self.config.webhooks.merge_request_url,
             covered_by_group_webhook=covered_by_group
         )
@@ -770,11 +791,19 @@ class QodoGitLabInstaller:
             # Create project token
             created_token = self.ensure_project_token(project_id)
 
+            # Generate unique webhook secret (or use configured one)
+            webhook_secret = self.config.webhooks.secret_token or self._generate_webhook_secret()
+
             # Create project webhook
-            webhook_ok = self.ensure_project_webhook(project_id)
+            webhook_ok, webhook_status = self.ensure_project_webhook(project_id, webhook_secret)
 
             if webhook_ok:
-                self.build_project_configuration_summary(project_id, created_token, covered_by_group)
+                # Only show the secret if the webhook was created or updated
+                summary_secret = webhook_secret if webhook_status in ('created', 'updated') else None
+                # If user provided a secret in config, always show it (they already know it)
+                if self.config.webhooks.secret_token:
+                    summary_secret = self.config.webhooks.secret_token
+                self.build_project_configuration_summary(project_id, created_token, summary_secret, covered_by_group)
                 self.report.projects_processed += 1
             else:
                 self.report.projects_skipped += 1
@@ -788,17 +817,20 @@ class QodoGitLabInstaller:
                 'error': str(e)
             })
 
-    def process_group(self, group_id: int, is_root: bool = False) -> bool:
-        """Process a single group (webhooks only, tokens handled separately for root groups)"""
+    def process_group(self, group_id: int, webhook_secret: str, is_root: bool = False) -> Tuple[bool, str]:
+        """Process a single group (webhooks only, tokens handled separately for root groups).
+
+        Returns (success, webhook_status) where webhook_status is 'created', 'updated', 'unchanged', or 'error'.
+        """
         logger.info(f"Processing group {group_id}")
-        
+
         try:
             # Ensure webhook
-            webhook_ok = self.ensure_group_webhook(group_id)
-            
+            webhook_ok, webhook_status = self.ensure_group_webhook(group_id, webhook_secret)
+
             self.report.groups_processed += 1
-            return webhook_ok
-            
+            return webhook_ok, webhook_status
+
         except Exception as e:
             logger.error(f"Group {group_id}: Processing failed: {e}")
             self.report.groups_skipped += 1
@@ -807,7 +839,7 @@ class QodoGitLabInstaller:
                 'operation': 'process_group',
                 'error': str(e)
             })
-            return False
+            return False, 'error'
     
     def run_checks(self) -> List[CheckResult]:
         """Validate configuration without making changes"""
@@ -852,39 +884,47 @@ class QodoGitLabInstaller:
                 message=f"Group ID: {group_id}"
             ))
 
-            # Check permissions (can we list tokens?)
-            try:
-                self.client.get(f'/api/v4/groups/{group_id}/access_tokens')
-                results.append(CheckResult(
-                    target=target, target_type="group",
-                    check_name="permissions", status="pass",
-                    message="Can list access tokens"
-                ))
-            except Exception:
-                results.append(CheckResult(
-                    target=target, target_type="group",
-                    check_name="permissions", status="fail",
-                    message="Cannot list access tokens (Owner role required)"
-                ))
+            # Check permissions and token state
+            if self.config.create_tokens:
+                # Check permissions (can we list tokens?)
+                try:
+                    self.client.get(f'/api/v4/groups/{group_id}/access_tokens')
+                    results.append(CheckResult(
+                        target=target, target_type="group",
+                        check_name="permissions", status="pass",
+                        message="Can list access tokens"
+                    ))
+                except Exception:
+                    results.append(CheckResult(
+                        target=target, target_type="group",
+                        check_name="permissions", status="fail",
+                        message="Cannot list access tokens (Owner role required)"
+                    ))
 
-            # Check token state
-            try:
-                tokens = self.client.get(f'/api/v4/groups/{group_id}/access_tokens')
-                existing = self.find_valid_token(tokens)
-                if existing:
-                    results.append(CheckResult(
-                        target=target, target_type="group",
-                        check_name="token_state", status="pass",
-                        message=f"Token exists (ID: {existing['id']}, expires: {existing.get('expires_at', 'unknown')})"
-                    ))
-                else:
-                    results.append(CheckResult(
-                        target=target, target_type="group",
-                        check_name="token_state", status="warn",
-                        message="No token found (will be created on run)"
-                    ))
-            except Exception:
-                pass  # Already covered by permissions check
+                # Check token state
+                try:
+                    tokens = self.client.get(f'/api/v4/groups/{group_id}/access_tokens')
+                    existing = self.find_valid_token(tokens)
+                    if existing:
+                        results.append(CheckResult(
+                            target=target, target_type="group",
+                            check_name="token_state", status="pass",
+                            message=f"Token exists (ID: {existing['id']}, expires: {existing.get('expires_at', 'unknown')})"
+                        ))
+                    else:
+                        results.append(CheckResult(
+                            target=target, target_type="group",
+                            check_name="token_state", status="warn",
+                            message="No token found (will be created on run)"
+                        ))
+                except Exception:
+                    pass  # Already covered by permissions check
+            else:
+                results.append(CheckResult(
+                    target=target, target_type="group",
+                    check_name="token_state", status="pass",
+                    message="N/A - token creation disabled"
+                ))
 
             # Check webhook state
             try:
@@ -957,39 +997,47 @@ class QodoGitLabInstaller:
                     message=f"Covered by group webhook (group ID: {covering_group})"
                 ))
 
-            # Check permissions
-            try:
-                self.client.get(f'/api/v4/projects/{project_id}/access_tokens')
-                results.append(CheckResult(
-                    target=target, target_type="project",
-                    check_name="permissions", status="pass",
-                    message="Can list access tokens"
-                ))
-            except Exception:
-                results.append(CheckResult(
-                    target=target, target_type="project",
-                    check_name="permissions", status="fail",
-                    message="Cannot list access tokens (Maintainer+ role required)"
-                ))
+            # Check permissions and token state
+            if self.config.create_tokens:
+                # Check permissions
+                try:
+                    self.client.get(f'/api/v4/projects/{project_id}/access_tokens')
+                    results.append(CheckResult(
+                        target=target, target_type="project",
+                        check_name="permissions", status="pass",
+                        message="Can list access tokens"
+                    ))
+                except Exception:
+                    results.append(CheckResult(
+                        target=target, target_type="project",
+                        check_name="permissions", status="fail",
+                        message="Cannot list access tokens (Maintainer+ role required)"
+                    ))
 
-            # Check token state
-            try:
-                tokens = self.client.get(f'/api/v4/projects/{project_id}/access_tokens')
-                existing = self.find_valid_token(tokens)
-                if existing:
-                    results.append(CheckResult(
-                        target=target, target_type="project",
-                        check_name="token_state", status="pass",
-                        message=f"Token exists (ID: {existing['id']}, expires: {existing.get('expires_at', 'unknown')})"
-                    ))
-                else:
-                    results.append(CheckResult(
-                        target=target, target_type="project",
-                        check_name="token_state", status="warn",
-                        message="No token found (will be created on run)"
-                    ))
-            except Exception:
-                pass
+                # Check token state
+                try:
+                    tokens = self.client.get(f'/api/v4/projects/{project_id}/access_tokens')
+                    existing = self.find_valid_token(tokens)
+                    if existing:
+                        results.append(CheckResult(
+                            target=target, target_type="project",
+                            check_name="token_state", status="pass",
+                            message=f"Token exists (ID: {existing['id']}, expires: {existing.get('expires_at', 'unknown')})"
+                        ))
+                    else:
+                        results.append(CheckResult(
+                            target=target, target_type="project",
+                            check_name="token_state", status="warn",
+                            message="No token found (will be created on run)"
+                        ))
+                except Exception:
+                    pass
+            else:
+                results.append(CheckResult(
+                    target=target, target_type="project",
+                    check_name="token_state", status="pass",
+                    message="N/A - token creation disabled"
+                ))
 
             # Check webhook state
             try:
@@ -1041,6 +1089,9 @@ class QodoGitLabInstaller:
         """Main execution flow"""
         logger.info("Starting Qodo GitLab integration setup")
 
+        if not self.config.create_tokens:
+            logger.info("Token creation disabled — only webhooks will be configured.")
+
         # Verify authentication
         if not self.verify_auth():
             return 3
@@ -1063,11 +1114,20 @@ class QodoGitLabInstaller:
             if self.config.auth_mode == "group_token_per_root_group":
                 created_token = self.ensure_group_token(group_id)
 
-            # Build configuration summary for this root group
-            self.build_configuration_summary(group_id, created_token)
+            # Generate unique webhook secret (or use configured one)
+            webhook_secret = self.config.webhooks.secret_token or self._generate_webhook_secret()
 
             # Process ONLY this root group (no subgroup traversal)
-            self.process_group(group_id, is_root=True)
+            webhook_ok, webhook_status = self.process_group(group_id, webhook_secret, is_root=True)
+
+            # Only show the secret if the webhook was created or updated
+            summary_secret = webhook_secret if webhook_status in ('created', 'updated') else None
+            # If user provided a secret in config, always show it (they already know it)
+            if self.config.webhooks.secret_token:
+                summary_secret = self.config.webhooks.secret_token
+
+            # Build configuration summary for this root group
+            self.build_configuration_summary(group_id, created_token, summary_secret)
 
         # Phase 2: Process individual projects
         if self.config.projects:
@@ -1101,7 +1161,9 @@ class QodoGitLabInstaller:
             print(f"--- Root Group {idx}: {summary.group_path} ---")
             print(f"  Group ID:          {summary.group_id}")
             
-            if summary.personal_access_token_used:
+            if summary.token_creation_skipped:
+                print(f"  Access Token:      Skipped (token creation disabled)")
+            elif summary.personal_access_token_used:
                 print(f"  Access Token:      Using Personal Access Token (from environment)")
                 print(f"                     Value: {self.gitlab_token[:8]}...{self.gitlab_token[-4:]}")
                 print(f"                     Scopes: api, read_repository")
@@ -1114,11 +1176,14 @@ class QodoGitLabInstaller:
                 print(f"                     Scopes: api, read_repository")
             
             print(f"  Webhook URL:       {summary.webhook_url}")
-            print(f"  Webhook Secret:    {summary.webhook_secret}")
-            if summary.webhook_secret_auto_generated:
-                print(f"                     ⚠️  AUTO-GENERATED - SAVE THIS!")
+            if summary.webhook_secret is None:
+                print(f"  Webhook Secret:    (unchanged - set during initial creation)")
+            else:
+                print(f"  Webhook Secret:    {summary.webhook_secret}")
+                if summary.webhook_secret_auto_generated:
+                    print(f"                     ⚠️  AUTO-GENERATED - SAVE THIS!")
             print()
-        
+
         # Print project configuration summary
         for idx, summary in enumerate(self.report.project_configuration_summary, 1):
             print(f"--- Project {idx}: {summary.project_path} ---")
@@ -1127,16 +1192,21 @@ class QodoGitLabInstaller:
             if summary.covered_by_group_webhook:
                 print(f"  Group Coverage:    Covered by group webhook (project webhook also configured)")
 
-            if summary.project_access_token:
+            if summary.token_creation_skipped:
+                print(f"  Project Token:     Skipped (token creation disabled)")
+            elif summary.project_access_token:
                 print(f"  Project Token:     {summary.project_access_token}")
                 print(f"                     ⚠️  SAVE THIS - shown only once!")
             else:
                 print(f"  Project Token:     Already exists (not shown)")
 
             print(f"  Webhook URL:       {summary.webhook_url}")
-            print(f"  Webhook Secret:    {summary.webhook_secret}")
-            if self.webhook_secret_auto_generated:
-                print(f"                     ⚠️  AUTO-GENERATED - SAVE THIS!")
+            if summary.webhook_secret is None:
+                print(f"  Webhook Secret:    (unchanged - set during initial creation)")
+            else:
+                print(f"  Webhook Secret:    {summary.webhook_secret}")
+                if summary.webhook_secret_auto_generated:
+                    print(f"                     ⚠️  AUTO-GENERATED - SAVE THIS!")
             print()
 
         print("=" * 80)
@@ -1191,7 +1261,8 @@ def load_config(config_path: str) -> Config:
         projects=projects,
         dry_run=data.get('dry_run', False),
         log_level=data.get('log_level', 'info'),
-        token_expires_in_days=data.get('token_expires_in_days', 365)
+        token_expires_in_days=data.get('token_expires_in_days', 365),
+        create_tokens=data.get('create_tokens', True)
     )
 
 
